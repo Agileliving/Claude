@@ -1,160 +1,179 @@
 """
 Scrapes the FDA inspection observations database (Form 483s) filtered to
-pharmaceutical product types. Handles both weekly pulls and historical backfill.
+pharmaceutical product types. Uses Playwright (real browser) to bypass
+FDA's bot detection on their search interface.
 """
-import time
+import asyncio
 import logging
+import time
 from datetime import date, datetime
 from typing import Generator
-import requests
-from bs4 import BeautifulSoup
-from tenacity import retry, stop_after_attempt, wait_exponential
 
-from config import (
-    FDA_483_URL, REQUEST_DELAY_SECONDS, REQUEST_TIMEOUT_SECONDS,
-    MAX_RETRIES, PHARMA_PRODUCT_CODES
-)
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+
+from config import REQUEST_DELAY_SECONDS
 
 logger = logging.getLogger(__name__)
 
-# FDA inspection observations search API endpoint
-FDA_SEARCH_API = "https://www.accessdata.fda.gov/scripts/inspsearch/inspectionresults.cfm"
+FDA_SEARCH_URL = (
+    "https://www.accessdata.fda.gov/scripts/inspsearch/inspectionresults.cfm"
+)
 
-PHARMA_CENTER_FILTERS = ["CDER", "CBER", "CVM"]
-
-
-@retry(stop=stop_after_attempt(MAX_RETRIES), wait=wait_exponential(multiplier=2, min=2, max=30))
-def _get(url: str, params: dict = None, session: requests.Session = None) -> requests.Response:
-    s = session or requests.Session()
-    resp = s.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS, headers={
-        "User-Agent": "Mozilla/5.0 (compatible; FDA483Researcher/1.0)"
-    })
-    resp.raise_for_status()
-    return resp
-
-
-def _parse_inspection_row(row) -> dict | None:
-    """Parse a single table row from the FDA inspection search results."""
-    cells = row.find_all("td")
-    if len(cells) < 8:
-        return None
-
-    def text(cell):
-        return cell.get_text(strip=True)
-
-    pdf_link = row.find("a", href=lambda h: h and ".pdf" in h.lower())
-
-    return {
-        "fda_inspection_id": text(cells[0]) or None,
-        "firm_name": text(cells[1]),
-        "city": text(cells[2]),
-        "state": text(cells[3]),
-        "zip_code": text(cells[4]),
-        "country": text(cells[5]),
-        "inspection_end_date": _parse_date(text(cells[6])),
-        "product_type": text(cells[7]),
-        "center": text(cells[8]) if len(cells) > 8 else None,
-        "pdf_url": ("https://www.accessdata.fda.gov" + pdf_link["href"]) if pdf_link else None,
-    }
+PHARMA_KEYWORDS = ["DRUG", "PHARMA", "API", "BIOLOGIC", "FINISHED DOSAGE", "CDER", "CBER"]
 
 
 def _parse_date(date_str: str) -> date | None:
     for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
         try:
-            return datetime.strptime(date_str, fmt).date()
+            return datetime.strptime(date_str.strip(), fmt).date()
         except (ValueError, TypeError):
             continue
     return None
 
 
 def _is_pharma(record: dict) -> bool:
-    """Filter to pharmaceutical inspections only."""
     product = (record.get("product_type") or "").upper()
     center = (record.get("center") or "").upper()
-    pharma_keywords = ["DRUG", "PHARMA", "API", "BIOLOGIC", "FINISHED DOSAGE"]
-    return (
-        any(kw in product for kw in pharma_keywords)
-        or center in PHARMA_CENTER_FILTERS
+    return any(kw in product or kw in center for kw in PHARMA_KEYWORDS)
+
+
+def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
+    """
+    Use a real Chromium browser to search the FDA inspection database
+    and collect all pharmaceutical inspection records.
+    """
+    records = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        )
+        page = context.new_page()
+
+        try:
+            logger.info("Opening FDA inspection search page...")
+            page.goto(FDA_SEARCH_URL, timeout=30000, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
+
+            # Fill in the date range fields
+            # Try common field name patterns used by the FDA form
+            for from_selector in ["#inspDateFrom", "input[name='inspDateFrom']", "input[name='dateFrom']"]:
+                try:
+                    page.fill(from_selector, start_date, timeout=3000)
+                    break
+                except Exception:
+                    continue
+
+            for to_selector in ["#inspDateTo", "input[name='inspDateTo']", "input[name='dateTo']"]:
+                try:
+                    page.fill(to_selector, end_date, timeout=3000)
+                    break
+                except Exception:
+                    continue
+
+            # Submit the form
+            for submit in ["input[type='submit']", "button[type='submit']", "#searchBtn"]:
+                try:
+                    page.click(submit, timeout=3000)
+                    break
+                except Exception:
+                    continue
+
+            page.wait_for_timeout(3000)
+
+        except PWTimeout:
+            logger.warning("Timed out loading FDA search page")
+
+        # Parse results from all pages
+        page_num = 1
+        while True:
+            html = page.content()
+            page_records = _parse_html_table(html)
+            pharma = [r for r in page_records if _is_pharma(r)]
+            records.extend(pharma)
+            logger.info(f"Page {page_num}: {len(pharma)} pharma records")
+
+            # Try to go to next page
+            try:
+                next_btn = page.query_selector("a:has-text('Next')")
+                if not next_btn:
+                    break
+                next_btn.click()
+                page.wait_for_timeout(2000)
+                page_num += 1
+            except Exception:
+                break
+
+        browser.close()
+
+    return records
+
+
+def _parse_html_table(html: str) -> list[dict]:
+    """Parse inspection records from FDA results table HTML."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Try to find the results table
+    table = (
+        soup.find("table", {"id": "inspectionResultsTable"})
+        or soup.find("table", class_="inspectionResults")
+        or next((t for t in soup.find_all("table") if t.find("td")), None)
     )
 
-
-def fetch_inspections_page(
-    start_date: str,
-    end_date: str,
-    page: int = 1,
-    page_size: int = 100,
-    session: requests.Session = None,
-) -> tuple[list[dict], bool]:
-    """
-    Fetch one page of inspection results from the FDA search.
-    Returns (records, has_more_pages).
-    """
-    params = {
-        "action": "Search",
-        "inspDateFrom": start_date,
-        "inspDateTo": end_date,
-        "pageNum": page,
-        "rowsPerPage": page_size,
-        "output": "display",
-    }
-
-    try:
-        resp = _get(FDA_SEARCH_API, params=params, session=session)
-    except Exception as e:
-        logger.error(f"Failed to fetch page {page}: {e}")
-        return [], False
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    table = soup.find("table", {"id": "inspectionResultsTable"}) or soup.find("table", class_="inspectionResults")
-
     if not table:
-        # Fallback: find any data table
-        tables = soup.find_all("table")
-        table = next((t for t in tables if t.find("td")), None)
+        return []
 
-    if not table:
-        return [], False
-
-    rows = table.find_all("tr")[1:]  # skip header
+    rows = table.find_all("tr")[1:]  # skip header row
     records = []
+
     for row in rows:
-        record = _parse_inspection_row(row)
-        if record and _is_pharma(record):
-            records.append(record)
+        cells = row.find_all("td")
+        if len(cells) < 6:
+            continue
 
-    # Check for next-page link
-    next_link = soup.find("a", string=lambda s: s and "next" in s.lower())
-    has_more = next_link is not None
+        def text(i):
+            return cells[i].get_text(strip=True) if i < len(cells) else ""
 
-    return records, has_more
+        pdf_link = row.find("a", href=lambda h: h and ".pdf" in h.lower())
+        pdf_url = None
+        if pdf_link:
+            href = pdf_link["href"]
+            if href.startswith("http"):
+                pdf_url = href
+            else:
+                pdf_url = "https://www.accessdata.fda.gov" + href
+
+        records.append({
+            "fda_inspection_id": text(0) or None,
+            "firm_name": text(1),
+            "city": text(2),
+            "state": text(3),
+            "zip_code": text(4),
+            "country": text(5),
+            "inspection_end_date": _parse_date(text(6)),
+            "product_type": text(7),
+            "center": text(8) if len(cells) > 8 else None,
+            "pdf_url": pdf_url,
+        })
+
+    return records
 
 
-def scrape_inspections(
-    start_date: str,
-    end_date: str,
-) -> Generator[dict, None, None]:
+def scrape_inspections(start_date: str, end_date: str) -> Generator[dict, None, None]:
     """
     Generator that yields all pharmaceutical inspection records
     between start_date and end_date (format: MM/DD/YYYY).
+    Uses a real browser to bypass FDA bot protection.
     """
-    session = requests.Session()
-    page = 1
-    total = 0
-
     logger.info(f"Scraping FDA 483s from {start_date} to {end_date}")
-
-    while True:
-        records, has_more = fetch_inspections_page(start_date, end_date, page=page, session=session)
-        for record in records:
-            total += 1
-            yield record
-
-        logger.info(f"Page {page}: {len(records)} pharma records (total so far: {total})")
-
-        if not has_more:
-            break
-
-        page += 1
-        time.sleep(REQUEST_DELAY_SECONDS)
-
-    logger.info(f"Scrape complete. Total pharmaceutical inspections found: {total}")
+    records = _scrape_with_browser(start_date, end_date)
+    logger.info(f"Scrape complete. Total pharmaceutical inspections found: {len(records)}")
+    for record in records:
+        yield record
