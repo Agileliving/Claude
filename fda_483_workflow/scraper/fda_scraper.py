@@ -182,6 +182,16 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
             # Always scrape the HTML table to get URLs (Excel strips hyperlinks)
             logger.info("Collecting URLs from rendered HTML table...")
             url_map = _collect_urls_from_table(page)
+
+            # For firms not found in the table, do a targeted FDA search per company
+            missing_firms = [r["firm_name"] for r in records if r["firm_name"] not in url_map]
+            if missing_firms:
+                logger.info(f"Looking up {len(missing_firms)} missing URLs via FDA search...")
+                for firm in missing_firms:
+                    url = _lookup_firm_url(page, firm)
+                    if url:
+                        url_map[firm] = url
+
             for r in records:
                 firm = r["firm_name"]
                 if firm in url_map:
@@ -190,7 +200,7 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
                     r["pdf_url"] = url if url.lower().endswith(".pdf") else r.get("pdf_url")
                     logger.info(f"Matched URL for {firm}: {url}")
                 else:
-                    logger.warning(f"No URL found in table for: {firm}")
+                    logger.warning(f"No URL found for: {firm}")
 
             if not exported:
                 logger.info("Excel export not available — scraping table pages directly")
@@ -243,6 +253,7 @@ def _parse_excel(excel_path: str, start_date: str, end_date: str) -> list[dict]:
     start = _parse_date(start_date)
     end = _parse_date(end_date)
 
+    seen = set()
     records = []
     for row in ws.iter_rows(min_row=2):
         subject = str(row[subj_col].value or "") if subj_col is not None else ""
@@ -260,6 +271,12 @@ def _parse_excel(excel_path: str, start_date: str, end_date: str) -> list[dict]:
         # Extract firm name and hyperlink from Company Name cell
         firm_cell = row[firm_col] if firm_col is not None else None
         firm = str(firm_cell.value or "Unknown").strip() if firm_cell is not None else "Unknown"
+
+        # Deduplicate by (firm, date)
+        dedup_key = (firm, str(ref_date))
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
 
         # Get the hyperlink embedded in the cell
         url = ""
@@ -288,20 +305,61 @@ def _parse_excel(excel_path: str, start_date: str, end_date: str) -> list[dict]:
     return records
 
 
+def _lookup_firm_url(page, firm_name: str) -> str | None:
+    """
+    Search the FDA warning letters page for a specific firm and return its URL.
+    Uses the DataTable search box to narrow to one result.
+    """
+    try:
+        search_input = page.query_selector(".dataTables_filter input[type=search], input.dt-search-input")
+        if not search_input:
+            return None
+        # Search by first ~30 chars of firm name to avoid special char issues
+        query = firm_name[:30].strip()
+        search_input.fill(query)
+        page.wait_for_timeout(1500)
+        soup = BeautifulSoup(page.content(), "html.parser")
+        table = soup.find("table")
+        if not table:
+            return None
+        for row in table.find_all("tr")[1:]:
+            for cell in row.find_all("td"):
+                link = cell.find("a", href=True)
+                if link and "/warning-letters/" in link["href"]:
+                    href = link["href"]
+                    return href if href.startswith("http") else f"https://www.fda.gov{href}"
+    except Exception as e:
+        logger.warning(f"Firm lookup failed for {firm_name}: {e}")
+    return None
+
+
 def _collect_urls_from_table(page) -> dict[str, str]:
     """
-    Scrape all pages of the visible DataTable and return a dict of
-    {company_name: warning_letter_url} by extracting href from Company Name links.
+    Scrape the DataTable filtered to CGMP records and return {company_name: url}.
+    Filters via the DataTable search box, then paginates all results.
     """
     url_map = {}
     page_num = 1
 
-    # Show as many rows as possible per page
+    # Filter the DataTable client-side to CGMP records only
     try:
-        page.select_option("#datatable_length, select[name='datatable_length']", value="100", timeout=2000)
-        page.wait_for_timeout(2000)
-    except Exception:
-        pass
+        search_input = page.query_selector(".dataTables_filter input[type=search], input.dt-search-input")
+        if search_input:
+            search_input.fill("CGMP")
+            page.wait_for_timeout(2000)
+            logger.info("Filtered DataTable to CGMP records via search box")
+    except Exception as e:
+        logger.warning(f"Could not filter DataTable: {e}")
+
+    # Show 100 rows per page
+    for length_sel in ["select[name$='_length']", ".dt-length select", "#datatable_length"]:
+        try:
+            page.select_option(length_sel, value="100", timeout=2000)
+            page.wait_for_timeout(1500)
+            logger.info(f"Set rows-per-page to 100 via {length_sel}")
+            break
+        except Exception:
+            continue
 
     while True:
         soup = BeautifulSoup(page.content(), "html.parser")
@@ -310,30 +368,33 @@ def _collect_urls_from_table(page) -> dict[str, str]:
             break
 
         rows = table.find_all("tr")[1:]
+        page_found = 0
         for row in rows:
             cells = row.find_all("td")
-            if len(cells) < 3:
+            if len(cells) < 2:
                 continue
-            # Company Name is column index 2 (after expand button + Posted Date + Issue Date)
-            # Find first cell with an <a> tag
             for cell in cells:
                 link = cell.find("a", href=True)
-                if link:
+                if link and "/warning-letters/" in link["href"]:
                     firm = link.get_text(strip=True)
                     href = link["href"]
                     url = href if href.startswith("http") else f"https://www.fda.gov{href}"
                     url_map[firm] = url
+                    page_found += 1
                     break
 
-        logger.info(f"Table page {page_num}: collected {len(rows)} rows, {len(url_map)} URLs total")
+        logger.info(f"Table page {page_num}: {len(rows)} rows, {page_found} warning letter URLs, {len(url_map)} total")
 
+        # Try to go to next page
         try:
-            next_btn = page.query_selector(".paginate_button.next:not(.disabled), a:has-text('Next'):not(.disabled)")
+            next_btn = page.query_selector(".paginate_button.next:not(.disabled)")
             if not next_btn:
                 break
             next_btn.click()
             page.wait_for_timeout(2000)
             page_num += 1
+            if page_num > 50:  # safety limit
+                break
         except Exception:
             break
 
