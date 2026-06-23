@@ -45,7 +45,19 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
     records = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # Use installed Chrome/Chromium if available, fall back to downloaded
+        import shutil
+        chrome_paths = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ]
+        chrome_exe = next((p for p in chrome_paths if shutil.which(p) or __import__('os').path.exists(p)), None)
+
+        if chrome_exe:
+            browser = p.chromium.launch(headless=True, executable_path=chrome_exe)
+        else:
+            browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
