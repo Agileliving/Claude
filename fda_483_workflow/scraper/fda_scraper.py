@@ -183,14 +183,15 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
             logger.info("Collecting URLs from rendered HTML table...")
             url_map = _collect_urls_from_table(page)
 
-            # For firms not found in the table, do a targeted FDA search per company
+            # For firms not found in the table, fall back to HTTP search per company
             missing_firms = [r["firm_name"] for r in records if r["firm_name"] not in url_map]
             if missing_firms:
-                logger.info(f"Looking up {len(missing_firms)} missing URLs via FDA search...")
+                logger.info(f"Looking up {len(missing_firms)} missing URLs via HTTP search...")
                 for firm in missing_firms:
-                    url = _lookup_firm_url(page, firm)
+                    url = _find_url_via_requests(firm)
                     if url:
                         url_map[firm] = url
+                        logger.info(f"HTTP fallback found URL for {firm}: {url}")
 
             for r in records:
                 firm = r["firm_name"]
@@ -305,53 +306,57 @@ def _parse_excel(excel_path: str, start_date: str, end_date: str) -> list[dict]:
     return records
 
 
-def _lookup_firm_url(page, firm_name: str) -> str | None:
+def _find_url_via_requests(firm_name: str) -> str | None:
     """
-    Search the FDA warning letters page for a specific firm and return its URL.
-    Uses the DataTable search box to narrow to one result.
+    Fallback: search FDA warning letters page via HTTP for a firm and return its URL.
+    Uses the first significant word(s) of the firm name to search.
     """
+    import requests
+    from urllib.parse import urlencode
+
+    # Use the first meaningful word of the firm name (skip short words)
+    words = [w for w in firm_name.split() if len(w) > 3]
+    query = words[0] if words else firm_name[:20]
+
+    base = (
+        "https://www.fda.gov/inspections-compliance-enforcement-and-criminal-investigations"
+        "/compliance-actions-and-activities/warning-letters"
+    )
     try:
-        search_input = page.query_selector(".dataTables_filter input[type=search], input.dt-search-input")
-        if not search_input:
+        url = f"{base}?{urlencode({'search_api_fulltext': query})}"
+        resp = requests.get(url, timeout=20, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        })
+        if not resp.ok:
             return None
-        # Search by first ~30 chars of firm name to avoid special char issues
-        query = firm_name[:30].strip()
-        search_input.fill(query)
-        page.wait_for_timeout(1500)
-        soup = BeautifulSoup(page.content(), "html.parser")
-        table = soup.find("table")
-        if not table:
-            return None
-        for row in table.find_all("tr")[1:]:
-            for cell in row.find_all("td"):
-                link = cell.find("a", href=True)
-                if link and "/warning-letters/" in link["href"]:
-                    href = link["href"]
+        soup = BeautifulSoup(resp.text, "html.parser")
+        firm_lower = firm_name.lower()
+        # Try to find a link whose text matches the firm name
+        for link in soup.find_all("a", href=True):
+            href = link["href"]
+            if "/warning-letters/" in href and href.count("/") > 4:
+                text = link.get_text(strip=True).lower()
+                if any(w.lower() in text for w in firm_name.split()[:2] if len(w) > 3):
                     return href if href.startswith("http") else f"https://www.fda.gov{href}"
+        # Return first warning letter link as last resort
+        for link in soup.find_all("a", href=True):
+            href = link["href"]
+            if "/warning-letters/" in href and href.count("/") > 4:
+                return href if href.startswith("http") else f"https://www.fda.gov{href}"
     except Exception as e:
-        logger.warning(f"Firm lookup failed for {firm_name}: {e}")
+        logger.warning(f"Requests URL lookup failed for {firm_name}: {e}")
     return None
 
 
 def _collect_urls_from_table(page) -> dict[str, str]:
     """
-    Scrape the DataTable filtered to CGMP records and return {company_name: url}.
-    Filters via the DataTable search box, then paginates all results.
+    Paginate through ALL pages of the DataTable and collect {company_name: url}.
+    Uses JavaScript to click Next since CSS selectors vary across FDA page versions.
     """
     url_map = {}
     page_num = 1
 
-    # Filter the DataTable client-side to CGMP records only
-    try:
-        search_input = page.query_selector(".dataTables_filter input[type=search], input.dt-search-input")
-        if search_input:
-            search_input.fill("CGMP")
-            page.wait_for_timeout(2000)
-            logger.info("Filtered DataTable to CGMP records via search box")
-    except Exception as e:
-        logger.warning(f"Could not filter DataTable: {e}")
-
-    # Show 100 rows per page
+    # Show 100 rows per page to minimise page count
     for length_sel in ["select[name$='_length']", ".dt-length select", "#datatable_length"]:
         try:
             page.select_option(length_sel, value="100", timeout=2000)
@@ -370,10 +375,7 @@ def _collect_urls_from_table(page) -> dict[str, str]:
         rows = table.find_all("tr")[1:]
         page_found = 0
         for row in rows:
-            cells = row.find_all("td")
-            if len(cells) < 2:
-                continue
-            for cell in cells:
+            for cell in row.find_all("td"):
                 link = cell.find("a", href=True)
                 if link and "/warning-letters/" in link["href"]:
                     firm = link.get_text(strip=True)
@@ -383,19 +385,29 @@ def _collect_urls_from_table(page) -> dict[str, str]:
                     page_found += 1
                     break
 
-        logger.info(f"Table page {page_num}: {len(rows)} rows, {page_found} warning letter URLs, {len(url_map)} total")
+        logger.info(f"Table page {page_num}: {len(rows)} rows, {page_found} WL URLs, {len(url_map)} total")
 
-        # Try to go to next page
-        try:
-            next_btn = page.query_selector(".paginate_button.next:not(.disabled)")
-            if not next_btn:
-                break
-            next_btn.click()
-            page.wait_for_timeout(2000)
-            page_num += 1
-            if page_num > 50:  # safety limit
-                break
-        except Exception:
+        # Use JavaScript click on Next to avoid selector fragility
+        clicked = page.evaluate("""
+            () => {
+                var candidates = [
+                    document.querySelector('.paginate_button.next:not(.disabled) a'),
+                    document.querySelector('.paginate_button.next:not(.disabled)'),
+                    document.querySelector('li.next:not(.disabled) a'),
+                    document.querySelector('a[aria-label="Next"]:not([aria-disabled="true"])'),
+                ];
+                for (var el of candidates) {
+                    if (el) { el.click(); return true; }
+                }
+                return false;
+            }
+        """)
+        if not clicked:
+            logger.info(f"No more pages after page {page_num}")
+            break
+        page.wait_for_timeout(2000)
+        page_num += 1
+        if page_num > 60:  # safety: 60 × 100 = 6000 rows max
             break
 
     return url_map
