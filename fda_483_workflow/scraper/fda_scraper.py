@@ -213,59 +213,67 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
 
 
 def _parse_excel(excel_path: str, start_date: str, end_date: str) -> list[dict]:
-    """Parse the downloaded Warning Letters Excel file into inspection records."""
+    """
+    Parse the downloaded Warning Letters Excel file.
+    Extracts hyperlinks from the Company Name column using openpyxl directly.
+    """
+    import openpyxl
     logger.info(f"Parsing Excel: {excel_path}")
+
     try:
-        df = pd.read_excel(excel_path)
-        logger.info(f"Excel columns: {list(df.columns)}")
-        logger.info(f"Total rows in Excel: {len(df)}")
+        wb = openpyxl.load_workbook(excel_path)
+        ws = wb.active
     except Exception as e:
         logger.error(f"Failed to read Excel: {e}")
         return []
 
-    # Normalise column names
-    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-    logger.info(f"Normalised columns: {list(df.columns)}")
+    # Read headers from first row
+    headers = [str(cell.value or "").strip().lower().replace(" ", "_") for cell in ws[1]]
+    logger.info(f"Excel columns: {headers}")
 
-    # Map column names flexibly
-    col_map = {}
-    for col in df.columns:
-        if "company" in col or "firm" in col:
-            col_map["firm_name"] = col
-        elif "posted" in col:
-            col_map["posted_date"] = col
-        elif "issue" in col and "date" in col:
-            col_map["issue_date"] = col
-        elif "subject" in col:
-            col_map["subject"] = col
-        elif "office" in col or "issuing" in col:
-            col_map["office"] = col
-        elif "url" in col or "link" in col or "letter" in col:
-            col_map["url"] = col
+    # Find column indices
+    def col_idx(keywords):
+        for i, h in enumerate(headers):
+            if any(kw in h for kw in keywords):
+                return i
+        return None
 
-    logger.info(f"Column mapping: {col_map}")
+    firm_col   = col_idx(["company", "firm"])
+    date_col   = col_idx(["issue", "letter_issue"])
+    posted_col = col_idx(["posted"])
+    subj_col   = col_idx(["subject"])
+
+    logger.info(f"Columns — firm:{firm_col} date:{date_col} posted:{posted_col} subject:{subj_col}")
 
     start = _parse_date(start_date)
     end = _parse_date(end_date)
 
     records = []
-    for _, row in df.iterrows():
-        subject = str(row.get(col_map.get("subject", ""), "") or "")
+    for row in ws.iter_rows(min_row=2):
+        subject = str(row[subj_col].value or "") if subj_col is not None else ""
         if not _is_cgmp_pharma(subject):
             continue
 
-        issue_date = _parse_date(row.get(col_map.get("issue_date", ""), ""))
-        posted_date = _parse_date(row.get(col_map.get("posted_date", ""), ""))
+        issue_date  = _parse_date(str(row[date_col].value or ""))   if date_col is not None else None
+        posted_date = _parse_date(str(row[posted_col].value or "")) if posted_col is not None else None
         ref_date = issue_date or posted_date
 
         if start and end and ref_date:
             if not (start <= ref_date <= end):
                 continue
 
-        firm = str(row.get(col_map.get("firm_name", ""), "") or "Unknown").strip()
-        url = str(row.get(col_map.get("url", ""), "") or "").strip()
+        # Extract firm name and hyperlink from Company Name cell
+        firm_cell = row[firm_col] if firm_col is not None else None
+        firm = str(firm_cell.value or "Unknown").strip() if firm_cell is not None else "Unknown"
+
+        # Get the hyperlink embedded in the cell
+        url = ""
+        if firm_cell and firm_cell.hyperlink:
+            url = firm_cell.hyperlink.target or ""
         if url and not url.startswith("http"):
             url = f"https://www.fda.gov{url}"
+
+        logger.info(f"  Record: {firm} | {ref_date} | {subject} | URL: {url or 'none'}")
 
         records.append({
             "fda_inspection_id": None,
@@ -277,8 +285,8 @@ def _parse_excel(excel_path: str, start_date: str, end_date: str) -> list[dict]:
             "inspection_end_date": ref_date,
             "product_type": subject,
             "center": "CDER",
-            "pdf_url": url if url.endswith(".pdf") else None,
-            "warning_letter_url": url if not url.endswith(".pdf") else None,
+            "pdf_url": url if url.lower().endswith(".pdf") else None,
+            "warning_letter_url": url if url and not url.lower().endswith(".pdf") else None,
         })
 
     logger.info(f"Parsed {len(records)} CGMP pharmaceutical records from Excel")

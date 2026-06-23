@@ -85,6 +85,59 @@ def _persist_inspection(session, record: dict, analysis_result: dict, extraction
     ai.model_used = analysis_result.get("model_used")
 
 
+def _fetch_warning_letter_text(url: str, firm_name: str):
+    """
+    Fetch a warning letter HTML page and convert it to an ExtractionResult
+    so it can be analyzed the same way as a PDF.
+    """
+    import requests
+    from extractor.pdf_extractor import ExtractionResult, Observation
+
+    try:
+        resp = requests.get(url, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        })
+        resp.raise_for_status()
+    except Exception as e:
+        logger.error(f"Failed to fetch warning letter {url}: {e}")
+        return None
+
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    # Remove nav/footer/header noise
+    for tag in soup(["nav", "footer", "header", "script", "style"]):
+        tag.decompose()
+
+    raw_text = soup.get_text(separator="\n", strip=True)
+
+    # Warning letters don't have numbered observations like 483s.
+    # Split on numbered paragraphs or common GMP violation markers.
+    import re
+    # Try splitting on numbered items like "1.", "2." etc.
+    parts = re.split(r'\n\s*(\d{1,2})\.\s+', raw_text)
+    observations = []
+    if len(parts) > 1:
+        for i in range(1, len(parts), 2):
+            num = int(parts[i])
+            text = parts[i + 1].strip() if i + 1 < len(parts) else ""
+            if len(text) > 30:
+                observations.append(Observation(number=num, text=text))
+
+    # If no numbered items found, treat the full letter as one observation
+    if not observations:
+        observations = [Observation(number=1, text=raw_text[:8000])]
+
+    logger.info(f"Fetched warning letter for {firm_name}: {len(observations)} sections, {len(raw_text)} chars")
+
+    return ExtractionResult(
+        raw_text=raw_text,
+        observations=observations,
+        num_observations=len(observations),
+        extraction_error=None,
+    )
+
+
 def process_date_range(start_date: date, end_date: date) -> None:
     """
     Scrape, download, extract, analyze, and store all pharmaceutical
@@ -102,11 +155,13 @@ def process_date_range(start_date: date, end_date: date) -> None:
         logger.info("No records found for this period.")
         return
 
-    # Download PDFs
+    # Download PDFs where available
     records = batch_download(records)
 
     for record in records:
-        fda_id = record.get("fda_inspection_id", "unknown")
+        firm = record.get("firm_name", "Unknown")
+        # Use firm name + date as unique ID when no FDA ID exists
+        fda_id = record.get("fda_inspection_id") or f"{firm}_{record.get('inspection_end_date', '')}"
 
         # Skip if already processed
         with get_session() as session:
@@ -115,12 +170,15 @@ def process_date_range(start_date: date, end_date: date) -> None:
                 logger.info(f"Already processed: {fda_id} — skipping")
                 continue
 
-        # Extract text from PDF
-        if not record.get("pdf_local_path"):
-            logger.warning(f"No PDF for {fda_id} — skipping extraction")
+        # Get text from PDF or warning letter HTML page
+        extraction = None
+        if record.get("pdf_local_path"):
+            extraction = extract_form_483(record["pdf_local_path"])
+        elif record.get("warning_letter_url"):
+            extraction = _fetch_warning_letter_text(record["warning_letter_url"], firm)
+        else:
+            logger.warning(f"No content source for {fda_id} — skipping")
             continue
-
-        extraction = extract_form_483(record["pdf_local_path"])
         if extraction.extraction_error:
             logger.error(f"Extraction failed for {fda_id}: {extraction.extraction_error}")
             continue
