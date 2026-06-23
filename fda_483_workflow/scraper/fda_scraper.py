@@ -1,30 +1,30 @@
 """
-Scrapes the FDA inspection observations database (Form 483s) filtered to
-pharmaceutical product types. Uses Playwright (real browser) to bypass
-FDA's bot detection on their search interface.
+Scrapes FDA Form 483s from the FDA FOIA Electronic Reading Room.
+483s are published at: https://www.fda.gov/inspections-compliance-enforcement/inspection-observations
+and the FOIA reading room organized by year/district.
+Uses Playwright (real browser) to navigate JavaScript-rendered pages.
 """
 import logging
 import os
-import shutil
 from datetime import date, datetime
 from typing import Generator
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-from config import REQUEST_DELAY_SECONDS
-
 logger = logging.getLogger(__name__)
 
-# FDA inspection observations search — newer interface
-FDA_SEARCH_URL = "https://www.fda.gov/inspections-compliance-enforcement/inspection-observations"
-# Fallback: accessdata direct search
-FDA_ACCESSDATA_URL = "https://www.accessdata.fda.gov/scripts/inspsearch/"
+# FDA 483 FOIA reading room — organized by year
+FDA_483_FOIA_URL = "https://www.fda.gov/regulatory-information/freedom-of-information/foia-electronic-reading-room"
+# FDA inspection observations landing page
+FDA_OBS_URL = "https://www.fda.gov/inspections-compliance-enforcement/inspection-observations"
+# FDA ORA data dashboard
+FDA_DASHBOARD_URL = "https://datadashboard.fda.gov/ora/cd/inspections.htm"
 
-PHARMA_KEYWORDS = ["DRUG", "PHARMA", "API", "BIOLOGIC", "FINISHED DOSAGE", "CDER", "CBER"]
+PHARMA_KEYWORDS = ["DRUG", "PHARMA", "API", "BIOLOGIC", "CDER", "CBER", "PHARMACEUTICAL"]
 
 
 def _parse_date(date_str: str) -> date | None:
-    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%B %d, %Y", "%b %d, %Y"):
         try:
             return datetime.strptime(date_str.strip(), fmt).date()
         except (ValueError, TypeError):
@@ -32,14 +32,12 @@ def _parse_date(date_str: str) -> date | None:
     return None
 
 
-def _is_pharma(record: dict) -> bool:
-    product = (record.get("product_type") or "").upper()
-    center = (record.get("center") or "").upper()
-    return any(kw in product or kw in center for kw in PHARMA_KEYWORDS)
+def _is_pharma(text: str) -> bool:
+    text_upper = text.upper()
+    return any(kw in text_upper for kw in PHARMA_KEYWORDS)
 
 
 def _get_browser(p):
-    """Return a browser instance using system Chrome if available."""
     chrome_paths = [
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
@@ -52,93 +50,123 @@ def _get_browser(p):
     return p.chromium.launch(headless=True)
 
 
-def _save_debug_html(page, label: str = "fda"):
-    path = f"/tmp/{label}_debug.html"
+def _save_debug(page, name: str):
+    path = f"/tmp/fda_{name}_debug.html"
     with open(path, "w") as f:
         f.write(page.content())
-    logger.info(f"Page HTML saved to {path}")
-    return path
+    logger.info(f"Saved debug HTML: {path}")
 
 
-def _log_form_fields(page):
-    inputs = page.query_selector_all("input, select")
-    logger.info(f"Found {len(inputs)} form fields:")
-    for inp in inputs:
-        logger.info(
-            f"  name='{inp.get_attribute('name') or ''}' "
-            f"id='{inp.get_attribute('id') or ''}' "
-            f"type='{inp.get_attribute('type') or ''}'"
-        )
-
-
-def _try_fill(page, selectors: list[str], value: str) -> bool:
-    for sel in selectors:
-        try:
-            page.fill(sel, value, timeout=2000)
-            logger.info(f"Filled '{value}' using selector: {sel}")
-            return True
-        except Exception:
-            continue
-    return False
-
-
-def _try_click(page, selectors: list[str]) -> bool:
-    for sel in selectors:
-        try:
-            page.click(sel, timeout=2000)
-            logger.info(f"Clicked: {sel}")
-            return True
-        except Exception:
-            continue
-    return False
-
-
-def _parse_html_table(html: str) -> list[dict]:
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html, "html.parser")
-
-    table = (
-        soup.find("table", {"id": "inspectionResultsTable"})
-        or soup.find("table", class_="inspectionResults")
-        or next((t for t in soup.find_all("table") if len(t.find_all("tr")) > 2), None)
-    )
-    if not table:
-        return []
-
-    rows = table.find_all("tr")[1:]
+def _collect_483_links_from_foia(page, year: int) -> list[dict]:
+    """
+    Navigate the FDA FOIA reading room and collect 483 PDF links for a given year.
+    Returns list of {firm_name, pdf_url, year} dicts.
+    """
+    logger.info(f"Looking for Form 483s for year {year} in FOIA reading room...")
     records = []
-    for row in rows:
-        cells = row.find_all("td")
-        if len(cells) < 6:
-            continue
 
-        def text(i):
-            return cells[i].get_text(strip=True) if i < len(cells) else ""
+    try:
+        page.goto(FDA_483_FOIA_URL, timeout=60000, wait_until="networkidle")
+        page.wait_for_timeout(3000)
+        _save_debug(page, "foia_main")
 
-        pdf_link = row.find("a", href=lambda h: h and ".pdf" in h.lower())
-        pdf_url = None
-        if pdf_link:
-            href = pdf_link["href"]
-            pdf_url = href if href.startswith("http") else "https://www.accessdata.fda.gov" + href
+        # Find links containing "483" and the year
+        links = page.query_selector_all("a")
+        year_links = []
+        for link in links:
+            href = link.get_attribute("href") or ""
+            text = link.inner_text().strip()
+            if str(year) in text or str(year) in href:
+                if "483" in text or "483" in href or "observation" in text.lower():
+                    year_links.append({"text": text, "href": href})
+                    logger.info(f"Found year link: {text} -> {href}")
 
-        records.append({
-            "fda_inspection_id": text(0) or None,
-            "firm_name": text(1),
-            "city": text(2),
-            "state": text(3),
-            "zip_code": text(4),
-            "country": text(5),
-            "inspection_end_date": _parse_date(text(6)),
-            "product_type": text(7),
-            "center": text(8) if len(cells) > 8 else None,
-            "pdf_url": pdf_url,
-        })
+        # Follow each year link and collect PDF links
+        for year_link in year_links[:5]:  # limit to avoid excessive crawling
+            href = year_link["href"]
+            if not href:
+                continue
+            full_url = href if href.startswith("http") else f"https://www.fda.gov{href}"
+            try:
+                page.goto(full_url, timeout=30000, wait_until="networkidle")
+                page.wait_for_timeout(2000)
+                _save_debug(page, f"foia_{year}")
+
+                # Collect PDF links on this page
+                pdf_links = page.query_selector_all("a[href*='.pdf'], a[href*='.PDF']")
+                for pdf in pdf_links:
+                    href = pdf.get_attribute("href") or ""
+                    text = pdf.inner_text().strip()
+                    pdf_url = href if href.startswith("http") else f"https://www.fda.gov{href}"
+                    records.append({
+                        "fda_inspection_id": None,
+                        "firm_name": text or "Unknown",
+                        "city": None,
+                        "state": None,
+                        "zip_code": None,
+                        "country": "US",
+                        "inspection_end_date": None,
+                        "product_type": "Drug",
+                        "center": "CDER",
+                        "pdf_url": pdf_url,
+                    })
+                logger.info(f"Found {len(pdf_links)} PDFs at {full_url}")
+            except Exception as e:
+                logger.warning(f"Failed to load {full_url}: {e}")
+                continue
+
+    except Exception as e:
+        logger.error(f"FOIA reading room scrape failed: {e}")
+
+    return records
+
+
+def _collect_from_obs_page(page, start_date: date, end_date: date) -> list[dict]:
+    """
+    Try the FDA inspection observations page for links to 483s.
+    """
+    records = []
+    try:
+        logger.info(f"Trying FDA observations page: {FDA_OBS_URL}")
+        page.goto(FDA_OBS_URL, timeout=60000, wait_until="networkidle")
+        page.wait_for_timeout(3000)
+        _save_debug(page, "obs_page")
+
+        # Collect all PDF and detail links
+        links = page.query_selector_all("a[href*='.pdf'], a[href*='483'], a[href*='observation']")
+        logger.info(f"Found {len(links)} relevant links on observations page")
+
+        for link in links:
+            href = link.get_attribute("href") or ""
+            text = link.inner_text().strip()
+            if not href:
+                continue
+            full_url = href if href.startswith("http") else f"https://www.fda.gov{href}"
+            if ".pdf" in href.lower():
+                records.append({
+                    "fda_inspection_id": None,
+                    "firm_name": text or "Unknown",
+                    "city": None,
+                    "state": None,
+                    "zip_code": None,
+                    "country": "US",
+                    "inspection_end_date": None,
+                    "product_type": "Drug",
+                    "center": "CDER",
+                    "pdf_url": full_url,
+                })
+    except Exception as e:
+        logger.error(f"Observations page scrape failed: {e}")
+
     return records
 
 
 def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
-    records = []
+    start = _parse_date(start_date)
+    end = _parse_date(end_date)
+    years = list(range(start.year, end.year + 1)) if start and end else [2025]
 
+    records = []
     with sync_playwright() as p:
         browser = _get_browser(p)
         context = browser.new_context(
@@ -150,74 +178,33 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
         )
         page = context.new_page()
 
-        # Try the accessdata search interface first
-        for url in [FDA_ACCESSDATA_URL, FDA_SEARCH_URL]:
-            try:
-                logger.info(f"Trying: {url}")
-                page.goto(url, timeout=60000, wait_until="networkidle")
-                page.wait_for_timeout(3000)
-                _save_debug_html(page, label=url.split("/")[2].replace(".", "_"))
-                _log_form_fields(page)
+        # Try FOIA reading room first
+        for year in years:
+            found = _collect_483_links_from_foia(page, year)
+            records.extend(found)
+            logger.info(f"Year {year}: collected {len(found)} records from FOIA")
 
-                filled_from = _try_fill(page, [
-                    "#inspDateFrom", "input[name='inspDateFrom']",
-                    "input[name='dateFrom']", "input[name='startDate']",
-                    "input[name='start_date']", "input[name='from']",
-                ], start_date)
+        # If no results, try the observations page
+        if not records:
+            logger.info("No results from FOIA — trying observations page")
+            found = _collect_from_obs_page(page, start, end)
+            records.extend(found)
 
-                filled_to = _try_fill(page, [
-                    "#inspDateTo", "input[name='inspDateTo']",
-                    "input[name='dateTo']", "input[name='endDate']",
-                    "input[name='end_date']", "input[name='to']",
-                ], end_date)
-
-                if filled_from and filled_to:
-                    _try_click(page, [
-                        "input[type='submit']", "button[type='submit']",
-                        "#searchBtn", "input[value='Search']",
-                        "button:has-text('Search')", "input[value='GO']",
-                    ])
-                    page.wait_for_timeout(4000)
-                    logger.info("Form submitted — parsing results")
-                    break
-                else:
-                    logger.info(f"No matching date fields at {url}, trying next URL")
-
-            except PWTimeout:
-                logger.warning(f"Timeout loading {url}")
-                continue
-
-        # Collect results across pages
-        page_num = 1
-        while True:
-            html = page.content()
-            page_records = _parse_html_table(html)
-            pharma = [r for r in page_records if _is_pharma(r)]
-            records.extend(pharma)
-            logger.info(f"Page {page_num}: {len(pharma)} pharma records (of {len(page_records)} total)")
-
-            try:
-                next_btn = page.query_selector("a:has-text('Next')")
-                if not next_btn:
-                    break
-                next_btn.click()
-                page.wait_for_timeout(2000)
-                page_num += 1
-            except Exception:
-                break
-
+        # Save final page for debugging
+        _save_debug(page, "final")
         browser.close()
 
+    logger.info(f"Total records collected: {len(records)}")
     return records
 
 
 def scrape_inspections(start_date: str, end_date: str) -> Generator[dict, None, None]:
     """
-    Generator yielding all pharmaceutical Form 483 inspection records
-    between start_date and end_date (MM/DD/YYYY format).
+    Generator yielding pharmaceutical Form 483 inspection records.
+    Date format: MM/DD/YYYY
     """
     logger.info(f"Scraping FDA 483s from {start_date} to {end_date}")
     records = _scrape_with_browser(start_date, end_date)
-    logger.info(f"Scrape complete. Total pharmaceutical inspections found: {len(records)}")
+    logger.info(f"Scrape complete. Total found: {len(records)}")
     for record in records:
         yield record
