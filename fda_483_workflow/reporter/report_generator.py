@@ -140,4 +140,65 @@ def generate_weekly_report(week_start: date, week_end: date) -> str:
                 report_path=str(report_path),
             ))
 
+    # Publish to Notion if configured
+    _publish_to_notion(
+        week_start=week_start,
+        week_end=week_end,
+        markdown=rendered,
+        inspections_data=inspections_data,
+        total_observations=total_observations,
+    )
+
     return str(report_path)
+
+
+def _publish_to_notion(
+    week_start: date,
+    week_end: date,
+    markdown: str,
+    inspections_data: list[dict],
+    total_observations: int,
+) -> None:
+    """Publish the weekly report and each inspection to Notion (if credentials set)."""
+    import os
+    if not os.getenv("NOTION_TOKEN"):
+        return
+
+    from .notion_publisher import publish_weekly_report, publish_inspection
+
+    risk_summary = {
+        "Critical": _count_risk(inspections_data, "Critical"),
+        "Major": _count_risk(inspections_data, "Major"),
+        "Minor": _count_risk(inspections_data, "Minor"),
+    }
+
+    try:
+        url = publish_weekly_report(
+            week_start=week_start,
+            week_end=week_end,
+            markdown=markdown,
+            total_inspections=len(inspections_data),
+            total_observations=total_observations,
+            risk_summary=risk_summary,
+        )
+        logger.info(f"Weekly report on Notion: {url}")
+    except Exception as e:
+        logger.warning(f"Notion weekly report publish failed: {e}")
+
+    for insp in inspections_data:
+        try:
+            publish_inspection(
+                firm_name=insp["firm_name"],
+                city=insp.get("city", ""),
+                state=insp.get("state", ""),
+                country=insp.get("country", ""),
+                inspection_date=insp["inspection_date"],
+                num_observations=insp["num_observations"],
+                risk_level=insp["risk_level"],
+                executive_summary=insp["executive_summary"],
+                key_themes=insp["key_themes"],
+                top_gmp_gaps=insp["top_gmp_gaps"],
+                recommendations=insp["recommendations"],
+            )
+        except Exception as e:
+            logger.warning(f"Notion inspection publish failed for {insp['firm_name']}: {e}")

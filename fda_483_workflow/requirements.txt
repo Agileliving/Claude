@@ -11,3 +11,4 @@ python-dotenv>=1.0.0
 tqdm>=4.66.0
 tenacity>=9.0.0
 pandas>=2.2.0
+notion-client>=2.2.0
