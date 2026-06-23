@@ -162,6 +162,7 @@ def process_date_range(start_date: date, end_date: date) -> None:
         firm = record.get("firm_name", "Unknown")
         # Use firm name + date as unique ID when no FDA ID exists
         fda_id = record.get("fda_inspection_id") or f"{firm}_{record.get('inspection_end_date', '')}"
+        record["fda_inspection_id"] = fda_id  # ensure it's set before DB insert
 
         # Skip if already processed
         with get_session() as session:
