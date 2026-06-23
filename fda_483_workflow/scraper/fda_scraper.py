@@ -94,92 +94,111 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
             page.wait_for_timeout(6000)
             _save_debug(page, "wl_loaded")
 
-            # Log all inputs to understand filter structure
-            inputs = page.query_selector_all("input, select")
-            logger.info(f"Found {len(inputs)} form fields on page:")
-            for inp in inputs:
-                tag = inp.evaluate("el => el.tagName")
-                logger.info(
-                    f"  {tag}: name='{inp.get_attribute('name') or ''}' "
-                    f"id='{inp.get_attribute('id') or ''}' "
-                    f"type='{inp.get_attribute('type') or ''}' "
-                    f"placeholder='{inp.get_attribute('placeholder') or ''}'"
-                )
+            # ---- Use exact field IDs discovered from page inspection ----
 
-            # ---- Apply date filter ----
-            # Try to fill "Posted Date From" filter
-            for sel in [
-                "input[name*='date_from']", "input[name*='start']",
-                "input[placeholder*='From']", "input[placeholder*='Start']",
-                "input[placeholder*='from']", "#edit-field-issue-datetime-value",
-            ]:
-                try:
-                    page.fill(sel, start_date, timeout=2000)
-                    logger.info(f"Filled start date with: {sel}")
-                    break
-                except Exception:
-                    continue
+            # 1. Search for CGMP in the fulltext search box
+            try:
+                page.fill("#edit-search-api-fulltext", "CGMP Finished Pharmaceuticals Adulterated", timeout=3000)
+                logger.info("Filled fulltext search with CGMP filter")
+            except Exception as e:
+                logger.warning(f"Could not fill fulltext search: {e}")
 
-            for sel in [
-                "input[name*='date_to']", "input[name*='end']",
-                "input[placeholder*='To']", "input[placeholder*='End']",
-                "input[placeholder*='to']", "#edit-field-issue-datetime-value-1",
-            ]:
+            # 2. Select the year in the date dropdown
+            start_year = start_date.split("/")[-1] if "/" in start_date else "2025"
+            for year_sel in ["#edit-field-letter-issue-datetime", "#field_letter_issue_datetime_2"]:
                 try:
-                    page.fill(sel, end_date, timeout=2000)
-                    logger.info(f"Filled end date with: {sel}")
-                    break
-                except Exception:
-                    continue
+                    opts = page.query_selector_all(f"{year_sel} option")
+                    opt_values = [o.get_attribute("value") for o in opts]
+                    logger.info(f"Date dropdown options ({year_sel}): {opt_values}")
+                    if start_year in opt_values:
+                        page.select_option(year_sel, value=start_year, timeout=3000)
+                        logger.info(f"Selected year {start_year} in {year_sel}")
+                except Exception as e:
+                    logger.warning(f"Date dropdown {year_sel}: {e}")
 
-            # ---- Apply subject column filter (DataTables column search) ----
-            # DataTables column search inputs are usually below the header row
-            subject_filled = False
-            for sel in [
-                "tfoot input", "thead input",
-                "input[placeholder*='Subject']", "input[placeholder*='subject']",
-            ]:
-                try:
-                    elems = page.query_selector_all(sel)
-                    for elem in elems:
-                        placeholder = (elem.get_attribute("placeholder") or "").lower()
-                        if "subject" in placeholder or len(elems) == 1:
-                            elem.fill("CGMP/Finished Pharmaceuticals", timeout=2000)
-                            elem.press("Enter")
-                            logger.info(f"Filled subject column filter: {sel}")
-                            subject_filled = True
-                            break
-                    if subject_filled:
+            # 3. Use the DataTable column filter for Subject (id='lcds-datatable-filter--letter')
+            try:
+                opts = page.query_selector_all("#lcds-datatable-filter--letter option")
+                opt_texts = [o.inner_text().strip() for o in opts]
+                logger.info(f"Letter filter options: {opt_texts}")
+                # Find the CGMP option
+                cgmp_val = None
+                for o in opts:
+                    if "CGMP" in o.inner_text() and "Finished" in o.inner_text():
+                        cgmp_val = o.get_attribute("value")
                         break
-                except Exception:
-                    continue
+                if cgmp_val:
+                    page.select_option("#lcds-datatable-filter--letter", value=cgmp_val, timeout=3000)
+                    logger.info(f"Selected CGMP subject filter: value={cgmp_val}")
+            except Exception as e:
+                logger.warning(f"Letter filter: {e}")
 
-            # Submit any filter form
-            for sel in ["input[type='submit']", "button[type='submit']",
-                        "#edit-submit-warning-letters", "input[value='Apply']"]:
+            # 4. Click the filter Apply button — specifically the one near the warning letters form
+            #    Avoid the email subscription submit button
+            clicked_apply = False
+            apply_selectors = [
+                "#edit-submit-warning-letters",
+                "form.views-exposed-form input[type='submit']",
+                "input[id*='submit'][id*='warning']",
+                ".views-exposed-form input[type='submit']",
+            ]
+            for sel in apply_selectors:
                 try:
-                    page.click(sel, timeout=2000)
-                    logger.info(f"Clicked apply/submit: {sel}")
-                    page.wait_for_timeout(3000)
+                    page.click(sel, timeout=3000)
+                    logger.info(f"Clicked filter apply: {sel}")
+                    clicked_apply = True
+                    page.wait_for_timeout(4000)
                     break
                 except Exception:
                     continue
+
+            if not clicked_apply:
+                # Use JavaScript to trigger DataTable filtering directly
+                try:
+                    page.evaluate("""
+                        var table = document.querySelector('table');
+                        if (table && $.fn && $.fn.DataTable) {
+                            $(table).DataTable().search('CGMP Finished Pharmaceuticals').draw();
+                        }
+                    """)
+                    logger.info("Triggered DataTable search via JavaScript")
+                    page.wait_for_timeout(3000)
+                except Exception as e:
+                    logger.warning(f"JS DataTable search failed: {e}")
 
             _save_debug(page, "wl_filtered")
 
-            # ---- Click Export Excel ----
-            try:
-                with page.expect_download(timeout=30000) as download_info:
-                    page.click("button:has-text('Export Excel'), a:has-text('Export Excel'), "
-                               "input[value*='Export'], button:has-text('Export')", timeout=5000)
-                download = download_info.value
-                excel_path = os.path.join(download_path, "fda_warning_letters.xlsx")
-                download.save_as(excel_path)
-                logger.info(f"Downloaded Excel: {excel_path}")
-                records = _parse_excel(excel_path, start_date, end_date)
+            # 5. Try Export Excel — use multiple selectors and wait longer
+            export_selectors = [
+                "button.dt-button:has-text('Excel')",
+                "a.dt-button:has-text('Excel')",
+                ".dt-buttons button:has-text('Excel')",
+                ".dt-buttons a:has-text('Excel')",
+                "button:has-text('Export Excel')",
+                "a:has-text('Export Excel')",
+                ".buttons-excel",
+            ]
+            exported = False
+            for sel in export_selectors:
+                try:
+                    btn = page.query_selector(sel)
+                    if btn:
+                        logger.info(f"Found Excel export button: {sel}")
+                        with page.expect_download(timeout=60000) as download_info:
+                            btn.click()
+                        download = download_info.value
+                        excel_path = os.path.join(download_path, "fda_warning_letters.xlsx")
+                        download.save_as(excel_path)
+                        logger.info(f"Downloaded Excel: {excel_path}")
+                        records = _parse_excel(excel_path, start_date, end_date)
+                        exported = True
+                        break
+                except Exception as e:
+                    logger.warning(f"Export attempt failed ({sel}): {e}")
+                    continue
 
-            except Exception as e:
-                logger.warning(f"Excel export failed ({e}) — falling back to page scraping")
+            if not exported:
+                logger.info("Excel export not available — scraping table pages directly")
                 records = _scrape_table_pages(page)
 
         except PWTimeout as e:
