@@ -1,28 +1,38 @@
 """
-Scrapes FDA Form 483 PDFs using the FDA's site search (search.gov).
-Searches for "form 483 pharmaceutical [year]" and collects PDF links.
-Uses Playwright (real browser) with your system Chrome.
+Scrapes FDA Warning Letters filtered to CGMP/Pharmaceutical violations.
+Source: https://www.fda.gov/inspections-compliance-enforcement-and-criminal-investigations/
+        compliance-actions-and-activities/warning-letters
+
+Warning Letters explicitly cite 21 CFR violations and GMP deficiencies,
+making them ideal for cross-framework GMP analysis.
+Uses Playwright with system Chrome to navigate the search interface.
 """
 import logging
 import os
 import time
 from datetime import date, datetime
 from typing import Generator
-from urllib.parse import urlencode
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-# FDA uses search.gov — this is the reliable search endpoint
-FDA_SEARCH_BASE = "https://search.usa.gov/search"
-FDA_AFFILIATE = "fda"
+FDA_WARNING_LETTERS_URL = (
+    "https://www.fda.gov/inspections-compliance-enforcement-and-criminal-investigations"
+    "/compliance-actions-and-activities/warning-letters"
+)
 
-PHARMA_KEYWORDS = ["DRUG", "PHARMA", "API", "BIOLOGIC", "CDER", "CBER", "PHARMACEUTICAL", "483"]
+# Subject filter for pharmaceutical GMP warning letters
+PHARMA_SUBJECTS = [
+    "CGMP/Finished Pharmaceuticals/Adulterated",
+    "CGMP/Active Pharmaceutical Ingredients/Adulterated",
+    "CGMP/Biological Products",
+]
 
 
 def _parse_date(date_str: str) -> date | None:
-    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%m-%d-%Y"):
         try:
             return datetime.strptime(date_str.strip(), fmt).date()
         except (ValueError, TypeError):
@@ -50,66 +60,71 @@ def _save_debug(page, name: str):
     logger.info(f"Saved debug HTML: {path}")
 
 
-def _search_for_483s(page, year: int, query_term: str = "form 483 pharmaceutical") -> list[dict]:
-    """Search FDA site for 483 PDFs for a given year."""
+def _parse_warning_letter_list(html: str) -> list[dict]:
+    """Parse the warning letters search results table."""
+    soup = BeautifulSoup(html, "html.parser")
     records = []
-    search_query = f"{query_term} {year}"
-    params = urlencode({"affiliate": FDA_AFFILIATE, "query": search_query})
-    search_url = f"{FDA_SEARCH_BASE}?{params}"
 
-    logger.info(f"Searching FDA for: {search_query}")
-    logger.info(f"URL: {search_url}")
-
-    try:
-        page.goto(search_url, timeout=90000, wait_until="domcontentloaded")
-        page.wait_for_timeout(4000)
-        _save_debug(page, f"search_{year}")
-
-        # Collect PDF links from search results
-        pdf_links = page.query_selector_all("a[href*='.pdf'], a[href*='.PDF']")
-        logger.info(f"Found {len(pdf_links)} PDF links in search results for {year}")
-
-        for link in pdf_links:
-            href = link.get_attribute("href") or ""
-            text = link.inner_text().strip()
-            if not href:
+    # FDA warning letters are typically in a table or list
+    table = soup.find("table")
+    if table:
+        rows = table.find_all("tr")[1:]  # skip header
+        for row in rows:
+            cells = row.find_all("td")
+            if len(cells) < 3:
                 continue
+
+            def text(i):
+                return cells[i].get_text(strip=True) if i < len(cells) else ""
+
+            link = row.find("a", href=True)
+            href = link["href"] if link else ""
             full_url = href if href.startswith("http") else f"https://www.fda.gov{href}"
+
             records.append({
-                "fda_inspection_id": None,
-                "firm_name": text or f"FDA 483 - {year}",
+                "fda_inspection_id": text(0) or None,
+                "firm_name": text(1) or (link.get_text(strip=True) if link else "Unknown"),
                 "city": None,
                 "state": None,
                 "zip_code": None,
-                "country": "US",
-                "inspection_end_date": date(year, 1, 1),  # approximate
-                "product_type": "Drug/Pharmaceutical",
+                "country": text(2) if len(cells) > 2 else "US",
+                "inspection_end_date": _parse_date(text(3)) if len(cells) > 3 else None,
+                "product_type": "Drug/Pharmaceutical (Warning Letter)",
                 "center": "CDER",
-                "pdf_url": full_url,
+                "pdf_url": None,
+                "warning_letter_url": full_url,
             })
+        logger.info(f"Parsed {len(records)} records from table")
+        return records
 
-        # Also collect links to pages that may contain 483s
-        result_links = page.query_selector_all(".result-title a, .search-result-title a, h3 a, h2 a")
-        for link in result_links:
-            href = link.get_attribute("href") or ""
-            text = link.inner_text().strip()
-            if "483" in href or "483" in text or "observation" in text.lower():
-                logger.info(f"Found 483 result page: {text} -> {href}")
+    # Fallback: look for links in list items
+    links = soup.select("ul li a, .views-row a, .field-content a")
+    for link in links:
+        href = link.get("href", "")
+        if not href:
+            continue
+        full_url = href if href.startswith("http") else f"https://www.fda.gov{href}"
+        records.append({
+            "fda_inspection_id": None,
+            "firm_name": link.get_text(strip=True) or "Unknown",
+            "city": None,
+            "state": None,
+            "zip_code": None,
+            "country": "US",
+            "inspection_end_date": None,
+            "product_type": "Drug/Pharmaceutical (Warning Letter)",
+            "center": "CDER",
+            "pdf_url": None,
+            "warning_letter_url": full_url,
+        })
 
-    except PWTimeout:
-        logger.warning(f"Search timed out for year {year}")
-    except Exception as e:
-        logger.error(f"Search failed for year {year}: {e}")
-
+    logger.info(f"Parsed {len(records)} records from link list")
     return records
 
 
 def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
-    start = _parse_date(start_date)
-    end = _parse_date(end_date)
-    years = list(range(start.year, end.year + 1)) if start and end else [2025]
-
     records = []
+
     with sync_playwright() as p:
         browser = _get_browser(p)
         context = browser.new_context(
@@ -121,25 +136,107 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
         )
         page = context.new_page()
 
-        for year in years:
-            found = _search_for_483s(page, year)
-            records.extend(found)
-            logger.info(f"Year {year}: {len(found)} 483 records found")
-            time.sleep(2)
+        try:
+            logger.info(f"Loading FDA Warning Letters page...")
+            page.goto(FDA_WARNING_LETTERS_URL, timeout=90000, wait_until="domcontentloaded")
+            page.wait_for_timeout(5000)
+            _save_debug(page, "warning_letters_main")
+
+            # Log all form fields to understand the search interface
+            inputs = page.query_selector_all("input, select")
+            logger.info(f"Found {len(inputs)} form fields:")
+            for inp in inputs:
+                name = inp.get_attribute("name") or ""
+                id_ = inp.get_attribute("id") or ""
+                type_ = inp.get_attribute("type") or ""
+                tag = inp.evaluate("el => el.tagName")
+                logger.info(f"  {tag}: name='{name}' id='{id_}' type='{type_}'")
+
+            # Try to fill in date range
+            filled = False
+            for from_sel in ["input[name*='date_from']", "input[name*='start']",
+                              "input[name*='from']", "#edit-field-issue-datetime-value",
+                              "input[placeholder*='From']", "input[placeholder*='Start']"]:
+                try:
+                    page.fill(from_sel, start_date, timeout=2000)
+                    logger.info(f"Filled start date: {from_sel}")
+                    filled = True
+                    break
+                except Exception:
+                    continue
+
+            for to_sel in ["input[name*='date_to']", "input[name*='end']",
+                           "input[name*='to']", "#edit-field-issue-datetime-value-1",
+                           "input[placeholder*='To']", "input[placeholder*='End']"]:
+                try:
+                    page.fill(to_sel, end_date, timeout=2000)
+                    logger.info(f"Filled end date: {to_sel}")
+                    break
+                except Exception:
+                    continue
+
+            # Try to select CGMP subject filter
+            for sel_selector in ["select[name*='subject']", "select[name*='field']",
+                                  "#edit-field-subject-tid", "select[id*='subject']"]:
+                try:
+                    page.select_option(sel_selector,
+                                       label="CGMP/Finished Pharmaceuticals/Adulterated",
+                                       timeout=2000)
+                    logger.info(f"Selected CGMP subject filter: {sel_selector}")
+                    break
+                except Exception:
+                    continue
+
+            # Submit search
+            for submit_sel in ["input[type='submit']", "button[type='submit']",
+                                "#edit-submit-warning-letters", "button:has-text('Search')",
+                                "input[value='Apply']", "input[value='Search']"]:
+                try:
+                    page.click(submit_sel, timeout=2000)
+                    logger.info(f"Clicked submit: {submit_sel}")
+                    page.wait_for_timeout(4000)
+                    break
+                except Exception:
+                    continue
+
+            _save_debug(page, "warning_letters_results")
+
+            # Collect results across pages
+            page_num = 1
+            while True:
+                html = page.content()
+                page_records = _parse_warning_letter_list(html)
+                records.extend(page_records)
+                logger.info(f"Page {page_num}: {len(page_records)} warning letters")
+
+                # Next page
+                try:
+                    next_btn = page.query_selector("a:has-text('Next'), li.next a, .pager-next a")
+                    if not next_btn:
+                        break
+                    next_btn.click()
+                    page.wait_for_timeout(3000)
+                    page_num += 1
+                except Exception:
+                    break
+
+        except PWTimeout as e:
+            logger.error(f"Page timed out: {e}")
+        except Exception as e:
+            logger.error(f"Scrape failed: {e}")
 
         _save_debug(page, "final")
         browser.close()
 
-    logger.info(f"Total records collected: {len(records)}")
     return records
 
 
 def scrape_inspections(start_date: str, end_date: str) -> Generator[dict, None, None]:
     """
-    Generator yielding pharmaceutical Form 483 records.
+    Generator yielding FDA Warning Letter records for pharmaceutical CGMP violations.
     Date format: MM/DD/YYYY
     """
-    logger.info(f"Scraping FDA 483s from {start_date} to {end_date}")
+    logger.info(f"Scraping FDA Warning Letters from {start_date} to {end_date}")
     records = _scrape_with_browser(start_date, end_date)
     logger.info(f"Scrape complete. Total found: {len(records)}")
     for record in records:
