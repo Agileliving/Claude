@@ -66,8 +66,8 @@ def _collect_483_links_from_foia(page, year: int) -> list[dict]:
     records = []
 
     try:
-        page.goto(FDA_483_FOIA_URL, timeout=60000, wait_until="networkidle")
-        page.wait_for_timeout(3000)
+        page.goto(FDA_483_FOIA_URL, timeout=90000, wait_until="domcontentloaded")
+        page.wait_for_timeout(5000)
         _save_debug(page, "foia_main")
 
         # Find links containing "483" and the year
@@ -88,8 +88,8 @@ def _collect_483_links_from_foia(page, year: int) -> list[dict]:
                 continue
             full_url = href if href.startswith("http") else f"https://www.fda.gov{href}"
             try:
-                page.goto(full_url, timeout=30000, wait_until="networkidle")
-                page.wait_for_timeout(2000)
+                page.goto(full_url, timeout=60000, wait_until="domcontentloaded")
+                page.wait_for_timeout(3000)
                 _save_debug(page, f"foia_{year}")
 
                 # Collect PDF links on this page
@@ -128,8 +128,8 @@ def _collect_from_obs_page(page, start_date: date, end_date: date) -> list[dict]
     records = []
     try:
         logger.info(f"Trying FDA observations page: {FDA_OBS_URL}")
-        page.goto(FDA_OBS_URL, timeout=60000, wait_until="networkidle")
-        page.wait_for_timeout(3000)
+        page.goto(FDA_OBS_URL, timeout=90000, wait_until="domcontentloaded")
+        page.wait_for_timeout(5000)
         _save_debug(page, "obs_page")
 
         # Collect all PDF and detail links
