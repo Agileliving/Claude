@@ -69,34 +69,70 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
 
         try:
             logger.info("Opening FDA inspection search page...")
-            page.goto(FDA_SEARCH_URL, timeout=30000, wait_until="domcontentloaded")
-            page.wait_for_timeout(2000)
+            page.goto(FDA_SEARCH_URL, timeout=60000, wait_until="networkidle")
+            page.wait_for_timeout(3000)
 
-            # Fill in the date range fields
-            # Try common field name patterns used by the FDA form
-            for from_selector in ["#inspDateFrom", "input[name='inspDateFrom']", "input[name='dateFrom']"]:
+            # Save page HTML for debugging
+            html_debug = page.content()
+            debug_path = "/tmp/fda_page_debug.html"
+            with open(debug_path, "w") as f:
+                f.write(html_debug)
+            logger.info(f"Page HTML saved to {debug_path}")
+
+            # Log all input fields found on the page
+            inputs = page.query_selector_all("input, select")
+            logger.info(f"Found {len(inputs)} form fields on page:")
+            for inp in inputs:
+                name = inp.get_attribute("name") or ""
+                id_ = inp.get_attribute("id") or ""
+                type_ = inp.get_attribute("type") or ""
+                logger.info(f"  field: name='{name}' id='{id_}' type='{type_}'")
+
+            # Try all common FDA form field name patterns
+            filled_from = False
+            for sel in [
+                "#inspDateFrom", "input[name='inspDateFrom']",
+                "input[name='dateFrom']", "input[name='from_date']",
+                "input[name='startDate']", "input[name='start_date']",
+            ]:
                 try:
-                    page.fill(from_selector, start_date, timeout=3000)
+                    page.fill(sel, start_date, timeout=2000)
+                    logger.info(f"Filled start date using: {sel}")
+                    filled_from = True
                     break
                 except Exception:
                     continue
 
-            for to_selector in ["#inspDateTo", "input[name='inspDateTo']", "input[name='dateTo']"]:
+            filled_to = False
+            for sel in [
+                "#inspDateTo", "input[name='inspDateTo']",
+                "input[name='dateTo']", "input[name='to_date']",
+                "input[name='endDate']", "input[name='end_date']",
+            ]:
                 try:
-                    page.fill(to_selector, end_date, timeout=3000)
+                    page.fill(sel, end_date, timeout=2000)
+                    logger.info(f"Filled end date using: {sel}")
+                    filled_to = True
                     break
                 except Exception:
                     continue
+
+            if not filled_from or not filled_to:
+                logger.warning("Could not fill date fields — check /tmp/fda_page_debug.html for form structure")
 
             # Submit the form
-            for submit in ["input[type='submit']", "button[type='submit']", "#searchBtn"]:
+            for submit in [
+                "input[type='submit']", "button[type='submit']",
+                "#searchBtn", "input[value='Search']", "button:has-text('Search')",
+            ]:
                 try:
-                    page.click(submit, timeout=3000)
+                    page.click(submit, timeout=2000)
+                    logger.info(f"Clicked submit: {submit}")
                     break
                 except Exception:
                     continue
 
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(4000)
 
         except PWTimeout:
             logger.warning("Timed out loading FDA search page")
