@@ -197,6 +197,19 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
                     logger.warning(f"Export attempt failed ({sel}): {e}")
                     continue
 
+            # Always scrape the HTML table to get URLs (Excel strips hyperlinks)
+            logger.info("Collecting URLs from rendered HTML table...")
+            url_map = _collect_urls_from_table(page)
+            for r in records:
+                firm = r["firm_name"]
+                if firm in url_map:
+                    url = url_map[firm]
+                    r["warning_letter_url"] = url if not url.lower().endswith(".pdf") else None
+                    r["pdf_url"] = url if url.lower().endswith(".pdf") else r.get("pdf_url")
+                    logger.info(f"Matched URL for {firm}: {url}")
+                else:
+                    logger.warning(f"No URL found in table for: {firm}")
+
             if not exported:
                 logger.info("Excel export not available — scraping table pages directly")
                 records = _scrape_table_pages(page)
@@ -291,6 +304,58 @@ def _parse_excel(excel_path: str, start_date: str, end_date: str) -> list[dict]:
 
     logger.info(f"Parsed {len(records)} CGMP pharmaceutical records from Excel")
     return records
+
+
+def _collect_urls_from_table(page) -> dict[str, str]:
+    """
+    Scrape all pages of the visible DataTable and return a dict of
+    {company_name: warning_letter_url} by extracting href from Company Name links.
+    """
+    url_map = {}
+    page_num = 1
+
+    # Show as many rows as possible per page
+    try:
+        page.select_option("#datatable_length, select[name='datatable_length']", value="100", timeout=2000)
+        page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+    while True:
+        soup = BeautifulSoup(page.content(), "html.parser")
+        table = soup.find("table")
+        if not table:
+            break
+
+        rows = table.find_all("tr")[1:]
+        for row in rows:
+            cells = row.find_all("td")
+            if len(cells) < 3:
+                continue
+            # Company Name is column index 2 (after expand button + Posted Date + Issue Date)
+            # Find first cell with an <a> tag
+            for cell in cells:
+                link = cell.find("a", href=True)
+                if link:
+                    firm = link.get_text(strip=True)
+                    href = link["href"]
+                    url = href if href.startswith("http") else f"https://www.fda.gov{href}"
+                    url_map[firm] = url
+                    break
+
+        logger.info(f"Table page {page_num}: collected {len(rows)} rows, {len(url_map)} URLs total")
+
+        try:
+            next_btn = page.query_selector(".paginate_button.next:not(.disabled), a:has-text('Next'):not(.disabled)")
+            if not next_btn:
+                break
+            next_btn.click()
+            page.wait_for_timeout(2000)
+            page_num += 1
+        except Exception:
+            break
+
+    return url_map
 
 
 def _scrape_table_pages(page) -> list[dict]:
