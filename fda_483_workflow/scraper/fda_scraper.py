@@ -12,11 +12,11 @@ Strategy:
 import logging
 import os
 import time
-import glob
 from datetime import date, datetime
 from typing import Generator
 
 import pandas as pd
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 logger = logging.getLogger(__name__)
@@ -95,28 +95,10 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
             _save_debug(page, "wl_loaded")
 
             # ---- Use exact field IDs discovered from page inspection ----
+            # NOTE: Do NOT set the year dropdown (#field_letter_issue_datetime_2) — it causes
+            # Excel to export with empty columns. Date filtering is done in Python after download.
 
-            # 1. Search for CGMP in the fulltext search box
-            try:
-                page.fill("#edit-search-api-fulltext", "CGMP Finished Pharmaceuticals Adulterated", timeout=3000)
-                logger.info("Filled fulltext search with CGMP filter")
-            except Exception as e:
-                logger.warning(f"Could not fill fulltext search: {e}")
-
-            # 2. Select the year in the date dropdown
-            start_year = start_date.split("/")[-1] if "/" in start_date else "2025"
-            for year_sel in ["#edit-field-letter-issue-datetime", "#field_letter_issue_datetime_2"]:
-                try:
-                    opts = page.query_selector_all(f"{year_sel} option")
-                    opt_values = [o.get_attribute("value") for o in opts]
-                    logger.info(f"Date dropdown options ({year_sel}): {opt_values}")
-                    if start_year in opt_values:
-                        page.select_option(year_sel, value=start_year, timeout=3000)
-                        logger.info(f"Selected year {start_year} in {year_sel}")
-                except Exception as e:
-                    logger.warning(f"Date dropdown {year_sel}: {e}")
-
-            # 3. Use the DataTable column filter for Subject (id='lcds-datatable-filter--letter')
+            # 1. Use the DataTable column filter for Subject (id='lcds-datatable-filter--letter')
             try:
                 opts = page.query_selector_all("#lcds-datatable-filter--letter option")
                 opt_texts = [o.inner_text().strip() for o in opts]
