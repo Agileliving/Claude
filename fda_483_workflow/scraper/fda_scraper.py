@@ -205,7 +205,7 @@ def _scrape_with_browser(start_date: str, end_date: str) -> list[dict]:
 
             if not exported:
                 logger.info("Excel export not available — scraping table pages directly")
-                records = _scrape_table_pages(page)
+                records = _scrape_table_pages(page, start_date, end_date)
 
         except PWTimeout as e:
             logger.error(f"Page timed out: {e}")
@@ -413,51 +413,106 @@ def _collect_urls_from_table(page) -> dict[str, str]:
     return url_map
 
 
-def _scrape_table_pages(page) -> list[dict]:
-    """Fallback: scrape the visible table page by page."""
+def _scrape_table_pages(page, start_date: str = None, end_date: str = None) -> list[dict]:
+    """Fallback: scrape visible table pages, filtered by date range."""
     from bs4 import BeautifulSoup
     records = []
+    seen_urls = set()
     page_num = 1
+    max_pages = 100  # safety cap
 
-    while True:
+    start = _parse_date(start_date) if start_date else None
+    end = _parse_date(end_date) if end_date else None
+
+    # Try to set rows-per-page to 100 to reduce page count
+    for length_sel in ["select[name$='_length']", ".dt-length select", "#datatable_length"]:
+        try:
+            page.select_option(length_sel, value="100", timeout=2000)
+            page.wait_for_timeout(1500)
+            logger.info(f"Set rows-per-page to 100 via {length_sel}")
+            break
+        except Exception:
+            continue
+
+    while page_num <= max_pages:
         soup = BeautifulSoup(page.content(), "html.parser")
         table = soup.find("table")
         if not table:
             break
 
         rows = table.find_all("tr")[1:]
+        page_records = 0
+        all_out_of_range = True  # track if entire page is outside date range
+
         for row in rows:
             cells = row.find_all("td")
             if len(cells) < 4:
                 continue
+
             subject = cells[4].get_text(strip=True) if len(cells) > 4 else ""
+            ref_date = _parse_date(cells[1].get_text(strip=True))
+
+            # Date range check — table is sorted newest-first, so once we go below
+            # start_date we can stop entirely
+            if start and ref_date and ref_date < start:
+                logger.info(f"Page {page_num}: reached date {ref_date} < start {start}, stopping")
+                return records
+            if end and ref_date and ref_date > end:
+                continue  # skip future rows but keep scanning
+            if ref_date:
+                all_out_of_range = False
+
             if not _is_cgmp_pharma(subject):
                 continue
+
             link = row.find("a", href=True)
             href = link["href"] if link else ""
             full_url = href if href.startswith("http") else f"https://www.fda.gov{href}"
+
+            # Dedup by URL to detect when we've cycled back to the beginning
+            if full_url and full_url in seen_urls:
+                logger.info(f"Page {page_num}: duplicate URL detected — stopping pagination")
+                return records
+            if full_url:
+                seen_urls.add(full_url)
+
             records.append({
                 "fda_inspection_id": None,
                 "firm_name": cells[2].get_text(strip=True) if len(cells) > 2 else "Unknown",
                 "city": None, "state": None, "zip_code": None, "country": "US",
-                "inspection_end_date": _parse_date(cells[1].get_text(strip=True)),
+                "inspection_end_date": ref_date,
                 "product_type": subject,
                 "center": "CDER",
                 "pdf_url": None,
                 "warning_letter_url": full_url,
             })
+            page_records += 1
 
-        logger.info(f"Page {page_num}: {len(rows)} rows scraped")
+        logger.info(f"Page {page_num}: {len(rows)} rows, {page_records} CGMP matches, {len(records)} total")
 
-        try:
-            next_btn = page.query_selector("a:has-text('Next'), .paginate_button.next:not(.disabled)")
-            if not next_btn:
-                break
-            next_btn.click()
-            page.wait_for_timeout(2000)
-            page_num += 1
-        except Exception:
+        if all_out_of_range and start and end:
+            logger.info(f"Page {page_num}: all rows out of date range — stopping")
             break
+
+        clicked = page.evaluate("""
+            () => {
+                var candidates = [
+                    document.querySelector('.paginate_button.next:not(.disabled) a'),
+                    document.querySelector('.paginate_button.next:not(.disabled)'),
+                    document.querySelector('li.next:not(.disabled) a'),
+                    document.querySelector('a[aria-label="Next"]:not([aria-disabled="true"])'),
+                ];
+                for (var el of candidates) {
+                    if (el) { el.click(); return true; }
+                }
+                return false;
+            }
+        """)
+        if not clicked:
+            logger.info(f"No more pages after page {page_num}")
+            break
+        page.wait_for_timeout(2000)
+        page_num += 1
 
     return records
 
