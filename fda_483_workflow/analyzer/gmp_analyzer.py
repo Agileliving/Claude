@@ -98,8 +98,15 @@ def analyze_inspection(
             response = client.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=8192,
-                system=_SYSTEM_PROMPT,
+                system=[
+                    {
+                        "type": "text",
+                        "text": _SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 messages=[{"role": "user", "content": user_msg}],
+                extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
             )
 
             text_content = next(
