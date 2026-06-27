@@ -443,7 +443,7 @@ def _scrape_table_pages(page, start_date: str = None, end_date: str = None) -> l
 
         rows = table.find_all("tr")[1:]
         page_records = 0
-        all_out_of_range = True  # track if entire page is outside date range
+        all_before_start = True   # True until we see a row >= start_date
 
         for row in rows:
             cells = row.find_all("td")
@@ -453,15 +453,16 @@ def _scrape_table_pages(page, start_date: str = None, end_date: str = None) -> l
             subject = cells[4].get_text(strip=True) if len(cells) > 4 else ""
             ref_date = _parse_date(cells[1].get_text(strip=True))
 
-            # Date range check — table is sorted newest-first, so once we go below
-            # start_date we can stop entirely
+            # Table is sorted newest-first.
+            # Skip rows newer than end_date (keep paginating — older dates come later).
+            if end and ref_date and ref_date > end:
+                continue
+            # Stop once we've gone past start_date (all remaining rows are too old).
             if start and ref_date and ref_date < start:
                 logger.info(f"Page {page_num}: reached date {ref_date} < start {start}, stopping")
                 return records
-            if end and ref_date and ref_date > end:
-                continue  # skip future rows but keep scanning
             if ref_date:
-                all_out_of_range = False
+                all_before_start = False
 
             if not _is_cgmp_pharma(subject):
                 continue
@@ -491,9 +492,8 @@ def _scrape_table_pages(page, start_date: str = None, end_date: str = None) -> l
 
         logger.info(f"Page {page_num}: {len(rows)} rows, {page_records} CGMP matches, {len(records)} total")
 
-        if all_out_of_range and start and end:
-            logger.info(f"Page {page_num}: all rows out of date range — stopping")
-            break
+        # If every row on this page is still newer than start_date, keep paginating
+        # (don't stop — we just haven't reached our date range yet)
 
         clicked = page.evaluate("""
             () => {
