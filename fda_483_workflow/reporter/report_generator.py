@@ -60,7 +60,7 @@ def generate_weekly_report(week_start: date, week_end: date) -> str:
                 "country": insp.country,
                 "inspection_date": insp.inspection_end_date,
                 "num_observations": insp.num_observations or 0,
-                "risk_level": analysis.overall_risk_level,
+                "risk_level": analysis.risk_level,
                 "executive_summary": analysis.executive_summary or "",
                 "key_themes": analysis.key_themes or [],
                 "top_gmp_gaps": top_gmp_gaps,
