@@ -1,5 +1,4 @@
-"""
-Weekly scheduler: pulls new FDA 483s, analyzes them, and generates a report.
+"""Weekly scheduler: pulls new FDA 483s, analyzes them, and generates a report.
 Can also run a historical backfill for 2025–2026.
 """
 import logging
@@ -111,10 +110,7 @@ def _fetch_warning_letter_text(url: str, firm_name: str):
 
     raw_text = soup.get_text(separator="\n", strip=True)
 
-    # Warning letters don't have numbered observations like 483s.
-    # Split on numbered paragraphs or common GMP violation markers.
     import re
-    # Try splitting on numbered items like "1.", "2." etc.
     parts = re.split(r'\n\s*(\d{1,2})\.\s+', raw_text)
     observations = []
     if len(parts) > 1:
@@ -124,7 +120,6 @@ def _fetch_warning_letter_text(url: str, firm_name: str):
             if len(text) > 30:
                 observations.append(Observation(number=num, text=text))
 
-    # If no numbered items found, treat the full letter as one observation
     if not observations:
         observations = [Observation(number=1, text=raw_text[:8000])]
 
@@ -232,7 +227,6 @@ def run_backfill(start_date_str: str = None, end_date_str: str = None) -> None:
 
     current = start
     while current <= end:
-        # Process month by month
         if current.month == 12:
             chunk_end = date(current.year + 1, 1, 1) - timedelta(days=1)
         else:
@@ -241,10 +235,8 @@ def run_backfill(start_date_str: str = None, end_date_str: str = None) -> None:
         chunk_end = min(chunk_end, end)
         process_date_range(current, chunk_end)
 
-        # Generate monthly report
         generate_weekly_report(current, chunk_end)
 
-        # Move to next month
         if current.month == 12:
             current = date(current.year + 1, 1, 1)
         else:
