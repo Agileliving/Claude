@@ -348,15 +348,15 @@ def _find_url_via_requests(firm_name: str) -> str | None:
     return None
 
 
-def _collect_urls_from_table(page) -> dict[str, str]:
+def _collect_urls_from_table(page, max_urls: int = 500) -> dict[str, str]:
     """
-    Paginate through ALL pages of the DataTable and collect {company_name: url}.
-    Uses JavaScript to click Next since CSS selectors vary across FDA page versions.
+    Paginate through DataTable pages and collect {company_name: url}.
+    Stops after max_urls unique URLs are collected (prevents runaway pagination).
     """
     url_map = {}
     page_num = 1
 
-    # Show 100 rows per page to minimise page count
+    # Try to set rows-per-page to 100 to reduce page count
     for length_sel in ["select[name$='_length']", ".dt-length select", "#datatable_length"]:
         try:
             page.select_option(length_sel, value="100", timeout=2000)
@@ -387,7 +387,10 @@ def _collect_urls_from_table(page) -> dict[str, str]:
 
         logger.info(f"Table page {page_num}: {len(rows)} rows, {page_found} WL URLs, {len(url_map)} total")
 
-        # Use JavaScript click on Next to avoid selector fragility
+        if len(url_map) >= max_urls:
+            logger.info(f"Reached {max_urls} URL cap — stopping URL collection")
+            break
+
         clicked = page.evaluate("""
             () => {
                 var candidates = [
@@ -407,8 +410,6 @@ def _collect_urls_from_table(page) -> dict[str, str]:
             break
         page.wait_for_timeout(2000)
         page_num += 1
-        if page_num > 60:  # safety: 60 × 100 = 6000 rows max
-            break
 
     return url_map
 
