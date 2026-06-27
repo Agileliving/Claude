@@ -104,11 +104,13 @@ def publish_weekly_report(
 
     # Check if a page already exists for this week
     existing = notion.databases.query(
-        database_id=NOTION_REPORTS_DB_ID,
-        filter={
-            "property": "Week Start",
-            "date": {"equals": str(week_start)},
-        },
+        **{
+            "database_id": NOTION_REPORTS_DB_ID,
+            "filter": {
+                "property": "Week Start",
+                "date": {"equals": str(week_start)},
+            },
+        }
     )
 
     blocks = _md_to_blocks(markdown)
@@ -182,8 +184,10 @@ def publish_inspection(
 
     # Check for existing page
     existing = notion.databases.query(
-        database_id=NOTION_INSPECTIONS_DB_ID,
-        filter={"property": "Name", "title": {"equals": title}},
+        **{
+            "database_id": NOTION_INSPECTIONS_DB_ID,
+            "filter": {"property": "Name", "title": {"equals": title}},
+        }
     )
 
     properties = {

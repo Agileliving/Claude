@@ -175,6 +175,9 @@ def process_date_range(start_date: date, end_date: date) -> None:
         else:
             logger.warning(f"No content source for {fda_id} — skipping")
             continue
+        if extraction is None:
+            logger.warning(f"Could not fetch content for {fda_id} — skipping")
+            continue
         if extraction.extraction_error:
             logger.error(f"Extraction failed for {fda_id}: {extraction.extraction_error}")
             continue
