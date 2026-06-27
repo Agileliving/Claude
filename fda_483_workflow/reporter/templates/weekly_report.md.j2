@@ -1,0 +1,91 @@
+# FDA Form 483 Weekly GMP Intelligence Report
+**Period:** {{ report_week_start }} to {{ report_week_end }}
+**Generated:** {{ generated_at }}
+
+---
+
+## Executive Summary
+
+| Metric | Count |
+|--------|-------|
+| Pharmaceutical Inspections | {{ total_inspections }} |
+| Total Observations | {{ total_observations }} |
+| Critical Risk | {{ critical_count }} |
+| Major Risk | {{ major_count }} |
+| Minor Risk | {{ minor_count }} |
+
+---
+
+## Top GMP Themes This Week
+
+{% for theme in top_themes %}
+{{ loop.index }}. **{{ theme.name }}** — {{ theme.count }} observations across {{ theme.inspections }} inspections
+{% endfor %}
+
+---
+
+## Regulatory Framework Breakdown
+
+| Framework | Citations This Week |
+|-----------|-------------------|
+{% for fw, count in framework_counts.items() %}
+| {{ fw }} | {{ count }} |
+{% endfor %}
+
+---
+
+## Inspection Summaries
+
+{% for inspection in inspections %}
+### {{ loop.index }}. {{ inspection.firm_name }}
+**Location:** {{ inspection.city }}, {{ inspection.state }}, {{ inspection.country }}
+**Inspection Date:** {{ inspection.inspection_date }}
+**Observations:** {{ inspection.num_observations }} | **Risk Level:** {{ inspection.risk_level }}
+
+{{ inspection.executive_summary }}
+
+**Key GMP Gaps:**
+{% for gap in inspection.top_gmp_gaps %}
+- `{{ gap.reference }}` ({{ gap.framework }}): {{ gap.gap_description }}
+{% endfor %}
+
+**Key Themes:** {{ inspection.key_themes | join(", ") }}
+
+**Recommendations:**
+{{ inspection.recommendations }}
+
+---
+{% endfor %}
+
+## Cross-Framework Regulatory Analysis
+
+### FDA GMP (21 CFR 210/211) — Most Cited This Week
+{% for ref in fda_top_refs %}
+- **{{ ref.code }}** ({{ ref.count }}x): {{ ref.title }}
+{% endfor %}
+
+### EU GMP (EudraLex Vol. 4) — Most Cited This Week
+{% for ref in eu_top_refs %}
+- **{{ ref.code }}** ({{ ref.count }}x): {{ ref.title }}
+{% endfor %}
+
+### ICH Q Guidelines — Most Cited This Week
+{% for ref in ich_top_refs %}
+- **{{ ref.code }}** ({{ ref.count }}x): {{ ref.title }}
+{% endfor %}
+
+### PIC/S — Most Cited This Week
+{% for ref in pics_top_refs %}
+- **{{ ref.code }}** ({{ ref.count }}x): {{ ref.title }}
+{% endfor %}
+
+### WHO GMP — Most Cited This Week
+{% for ref in who_top_refs %}
+- **{{ ref.code }}** ({{ ref.count }}x): {{ ref.title }}
+{% endfor %}
+
+---
+
+*This report was generated automatically using AI-powered GMP analysis.
+All regulatory mappings should be verified by a qualified person (QP) or
+GMP Subject Matter Expert before use in regulatory submissions.*
