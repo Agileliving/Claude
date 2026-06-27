@@ -80,7 +80,8 @@ def _persist_inspection(session, record: dict, analysis_result: dict, extraction
     ai.key_themes = summary.get("key_themes", [])
     ai.risk_level = summary.get("overall_risk_level")
     ai.top_gmp_gaps = summary.get("top_gmp_gaps", [])
-    ai.recommendations = summary.get("recommendations")
+    recs = summary.get("recommendations")
+    ai.recommendations = "\n".join(recs) if isinstance(recs, list) else recs
     ai.model_used = analysis_result.get("model_used")
 
 
