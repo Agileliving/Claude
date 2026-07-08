@@ -1,101 +1,132 @@
-# Export one WeChat conversation to a single Word (.docx) file — macOS + iPhone
+# Export a WeChat conversation to a single Word (.docx) file — macOS
 
-The cheapest, most reliable way to turn a WeChat conversation into a Word
-document. All extraction is done by **free, offline, open-source tools** on your
-own Mac — no chat text is ever sent to a cloud service or an AI model, so the
-cost is essentially zero.
+Turn a WeChat conversation into a Word document using **free, offline,
+open-source tools** on your own Mac. There are two routes; pick based on your
+situation:
 
-Pipeline:
+- **Method A — decrypt WeChat *desktop*'s database (recommended, no cable).**
+  Best when you already use WeChat on the Mac and/or want a long history. Reads
+  the chats straight from the Mac, no iPhone or cable involved.
+- **Method B — iPhone backup + WechatExporter.** Use only if the chats live on
+  the phone and are *not* in the Mac desktop app.
 
-```
-unencrypted iPhone backup  ->  WechatExporter (HTML)  ->  html_to_docx.py  ->  chat.docx
-```
-
----
-
-## About the `.dat` files you uploaded
-
-The five uploaded files (`pkg_info.dat`, `phoneid.dat`, `d_s.dat`,
-`phone_history.dat`, `backup_time.dat`) are **not** usable and were set aside:
-
-- `pkg_info.dat` is only backup *metadata* (device name, backup path, a token).
-- The other four begin with `RMFH … RMFT` and hold **encrypted** payloads —
-  WeChat's "backup to computer" containers, which are designed to be restored
-  only back into WeChat, not exported to text. The decryption key lives with
-  your account, not in these files.
-- All five together are ~1.4 KB; the real message database (MB–GB) isn't even
-  present.
-
-There is no cheap way to convert those files. Use the pipeline below instead —
-it reads the live data via your iPhone.
+Either way, the final `->  .docx` step is done by `html_to_docx.py` in this
+folder.
 
 ---
 
-## Step 1 — Make an *unencrypted* iPhone backup on your Mac
+## ⚠️ The "which backup is which" trap (read this first)
 
-1. Connect the iPhone, open **Finder**, select the iPhone in the sidebar.
-2. Choose **"Back up all of the data on your iPhone to this Mac."**
-3. **Leave "Encrypt local backup" UNCHECKED** — WechatExporter cannot read
-   encrypted backups.
-4. Click **Back Up Now** and wait for it to finish.
+The word **"backup"** means two completely different things, and only one is
+usable:
 
-## Step 2 — Export the one conversation with WechatExporter
+| | ❌ WeChat's own "Backup to computer" | ✅ What you actually need |
+|---|---|---|
+| Where | WeChat app → *Backup & Restore* | Method A or B below |
+| Produces | An **encrypted** package: folders `ChatPackage`, `Index`, `Media` and files like `pkg_info.dat`, `phoneid.dat`, `d_s.dat`, `backup_time.dat`, `tar_index.dat` | Readable chat data |
+| Usable? | **No** — encrypted, restore-only, no chat text inside | Yes |
 
-1. Download the macOS build of **WechatExporter** (free, open-source):
-   https://github.com/BlueMatthew/WechatExporter/releases
-2. Open it. It auto-detects the Finder backup from Step 1.
-3. Select your WeChat account, find the **single contact/group** you want, and
-   select just that conversation.
-4. Export as **HTML** (recommended — keeps sender names and timestamps) or as
-   **Text**. Note the output folder.
+If what you have looks like the left column (a `ChatPackage`/`Media`/`Index`
+folder full of `.dat` files), set it aside — it cannot be converted to text by
+any tool. Those files are WeChat's encrypted archive, designed only to be
+restored back into WeChat on another phone. Use Method A instead.
 
-## Step 3 — Convert that export to a Word `.docx`
+---
 
-You have two options; pick whichever is easier for you.
+## Method A — Decrypt WeChat desktop's database with WxEcho (recommended, cable-free)
 
-**Option A — one-liner with pandoc** (simplest, if you have pandoc):
+Uses **WxEcho** (https://github.com/chang-xinhai/WxEcho). It reads the local,
+encrypted WeChat desktop database on your Mac and exports a chosen conversation
+to TXT/CSV/JSON. Everything stays on your machine.
 
+**Requirements**
+- **WeChat for Mac 4.x** (WxEcho supports 4.x, not 3.x). Check via WeChat menu →
+  *About WeChat*.
+- **Node.js** (for `npm`). Check with `node -v`; if missing, install with
+  `brew install node` (or from https://nodejs.org).
+- The conversation must actually be present in WeChat **desktop**. If older
+  history isn't there, migrate it to the Mac in WeChat first.
+
+**Steps**
 ```bash
-pandoc "path/to/exported chat.html" -o chat.docx
+# 1. Install WxEcho
+npm install -g @walkerch/wxecho
+
+# 2. Quit WeChat, then re-sign it so its in-memory key can be read.
+#    (Removes only the hardened-runtime restriction; no SIP disabling.
+#     Reversible by reinstalling WeChat. WeChat must be fully quit first.)
+sudo codesign --force --deep --sign - /Applications/WeChat.app
+
+# 3. Reopen WeChat and log in.
+
+# 4. Extract keys and decrypt the local databases.
+wxecho keys        # if it errors on permissions, retry with: sudo wxecho keys
+wxecho decrypt
+
+# 5. List conversations to find the exact name, then export the one you want.
+wxecho export -l
+wxecho export -n "Contact Name"        # or:  wxecho export -u <wxid>
 ```
+Note the path of the exported **`.txt`** file, then go to **Convert to Word**
+below.
 
-Install pandoc with `brew install pandoc` if needed.
+---
 
-**Option B — the included Python script** (no pandoc required):
+## Method B — iPhone backup + WechatExporter (alternative)
+
+Use only if the chats are on the iPhone and not in WeChat desktop.
+
+1. Connect the iPhone, open **Finder**, select the iPhone, choose **"Back up all
+   of the data on your iPhone to this Mac,"** **uncheck "Encrypt local backup,"**
+   and click **Back Up Now**. (This is an *iPhone* backup — not WeChat's
+   "backup to computer", which is the unusable encrypted package above.)
+2. Open **WechatExporter** (macOS build,
+   https://github.com/BlueMatthew/WechatExporter/releases). It auto-detects the
+   Finder backup. Select your account → the single conversation → export as
+   **HTML** (or Text).
+3. Convert to Word below.
+
+*If Finder never shows the iPhone: it's almost always a **power-only cable**
+(swap for a known data cable), an un-trusted phone (unlock it and tap **Trust**),
+or a stuck service (restart the Mac). Confirm detection with
+`system_profiler SPUSBDataType | grep -i -E 'iphone|apple|mobile'`.*
+
+---
+
+## Convert to Word (.docx)
+
+Run the converter on the file produced by Method A (`.txt`) or Method B
+(`.html`/`.txt`):
 
 ```bash
 cd wechat-export
-pip3 install -r requirements.txt          # installs python-docx (one time)
+pip3 install -r requirements.txt                       # installs python-docx (one time)
+python3 html_to_docx.py "path/to/exported chat.txt"  chat.docx
+# or, for an HTML export:
 python3 html_to_docx.py "path/to/exported chat.html" chat.docx
 ```
 
-The script also accepts a `.txt` export:
+You get a single `chat.docx` with every message as a paragraph, ready to open in
+Word or Pages.
 
+**Simplest alternative for HTML exports** — if you have pandoc:
 ```bash
-python3 html_to_docx.py "path/to/exported chat.txt" chat.docx
+pandoc "exported chat.html" -o chat.docx
 ```
-
-Either way you get a single `chat.docx` with every message as a paragraph
-(sender + timestamp + text), ready to open in Word or Pages.
 
 ---
 
 ## Try it first on the sample
 
-A tiny `sample.html` is included so you can confirm everything works before
-touching your real export:
-
 ```bash
 python3 html_to_docx.py sample.html sample.docx
-open sample.docx      # opens in Word / Pages
+open sample.docx
 ```
 
 ## Notes
 
-- The script uses only the Python standard library plus `python-docx`, and runs
-  fully offline.
-- If a future WechatExporter version changes its HTML layout and a message looks
-  oddly split or merged, the parser's block-tag handling is at the top of
-  `html_to_docx.py` (`_BLOCK_TAGS`) and is easy to adjust — or just use the
-  pandoc one-liner.
+- The converter uses only the Python standard library plus `python-docx`, fully
+  offline.
+- Method A needs WeChat **4.x**; for WeChat 3.x on Mac, an older key-extraction
+  tool is required (ask and I'll point you to one).
 - This exports **your own** chat history — a legitimate personal-data export.
