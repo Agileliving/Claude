@@ -1,5 +1,8 @@
 # Required: writes the .docx output.
 python-docx>=1.1.0
 
+# Required only for Method A's database decryption (wechat_v4_decrypt.py).
+pycryptodome>=3.20.0
+
 # The converter uses only the Python standard library for HTML parsing, so
 # nothing else is strictly required. python-docx is the single hard dependency.
