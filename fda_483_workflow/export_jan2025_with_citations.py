@@ -111,7 +111,6 @@ def main():
                 "location":         ", ".join(filter(None, [insp.city, insp.state])),
                 "inspection_date":  insp.inspection_end_date,
                 "num_findings":     insp.num_observations or 0,
-                "risk_level":       a.risk_level or "",
                 "fda_citations":    "\n\n".join(citations) or "(no citation text stored)",
                 "fda_cgmp_refs":    fda_refs,
                 "warning_letter_url": insp.pdf_url or "",
@@ -141,7 +140,6 @@ def main():
         "Location",
         "Inspection Date",
         "# Findings",
-        "Risk Level",
         "FDA CITATIONS\n(Original text from Warning Letter)",
         "FDA cGMP REFERENCES\n(21 CFR 210/211 — mapped per finding)",
         "Warning Letter URL",
@@ -152,9 +150,7 @@ def main():
 
     # ── Data ──────────────────────────────────────────────────────────────────
     for row_idx, r in enumerate(rows, 3):
-        alt       = ALT_FILL if row_idx % 2 == 0 else None
-        risk      = r["risk_level"]
-        risk_fill = RISK_FILL.get(risk, alt)
+        alt = ALT_FILL if row_idx % 2 == 0 else None
 
         values = [
             r["firm_name"],
@@ -162,7 +158,6 @@ def main():
             r["location"],
             str(r["inspection_date"]) if r["inspection_date"] else "",
             r["num_findings"],
-            risk,
             r["fda_citations"],
             r["fda_cgmp_refs"],
             r["warning_letter_url"],
@@ -170,25 +165,23 @@ def main():
 
         for col, val in enumerate(values, 1):
             if col == 6:
-                fill = risk_fill
-            elif col == 7:
                 fill = CITE_FILL      # warm cream — original FDA text
-            elif col == 8:
+            elif col == 7:
                 fill = REF_FILL       # light green — regulatory references
             else:
                 fill = alt
 
-            c = _cell(ws, row_idx, col, val, fill=fill, wrap=(col >= 7))
-            if col == 7:
+            c = _cell(ws, row_idx, col, val, fill=fill, wrap=(col >= 6))
+            if col == 6:
                 c.font = Font(size=9)
-            elif col == 8:
+            elif col == 7:
                 c.font = Font(size=9, bold=False, color="1A4D1A")
 
         citation_lines = r["fda_citations"].count("\n") + 1
         ws.row_dimensions[row_idx].height = min(400, max(80, citation_lines * 13))
 
     # ── Column widths ─────────────────────────────────────────────────────────
-    widths = [28, 10, 16, 14, 8, 10, 72, 48, 38]
+    widths = [28, 10, 16, 14, 8, 72, 48, 38]
     for col, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = w
 
