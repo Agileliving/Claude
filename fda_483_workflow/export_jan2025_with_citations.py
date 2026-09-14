@@ -1,6 +1,6 @@
 """
-Export January 2025 inspections to Excel with original FDA citation text
-and linked FDA cGMP references (21 CFR Part 210/211).
+Export all inspections (2025-01-01 to 2026-06-30) to Excel with original
+FDA citation text and linked FDA cGMP references (21 CFR Part 210/211).
 Run from the fda_483_workflow directory:
     python3 export_jan2025_with_citations.py
 """
@@ -72,15 +72,15 @@ def _build_fda_refs(obs_list) -> str:
 def main():
     init_db()
 
-    jan_start = date(2025, 1, 1)
-    jan_end   = date(2025, 1, 31)
+    start = date(2025, 1, 1)
+    end   = date(2026, 6, 30)
 
     with get_session() as session:
         inspections = (
             session.query(Inspection)
             .filter(
-                Inspection.inspection_end_date >= jan_start,
-                Inspection.inspection_end_date <= jan_end,
+                Inspection.inspection_end_date >= start,
+                Inspection.inspection_end_date <= end,
             )
             .order_by(Inspection.inspection_end_date)
             .all()
@@ -94,7 +94,6 @@ def main():
 
             obs_list = sorted(insp.observations, key=lambda o: o.observation_number or 0)
 
-            # Original FDA citation text per finding
             citations = []
             for obs in obs_list:
                 if obs.observation_text and obs.observation_text.strip():
@@ -102,33 +101,30 @@ def main():
                         f"[Finding {obs.observation_number}]\n{obs.observation_text.strip()}"
                     )
 
-            # FDA cGMP references from the AI mapping
             fda_refs = _build_fda_refs(obs_list)
 
             rows.append({
-                "firm_name":        insp.firm_name or "",
-                "country":          insp.country or "",
-                "location":         ", ".join(filter(None, [insp.city, insp.state])),
-                "inspection_date":  insp.inspection_end_date,
-                "num_findings":     insp.num_observations or 0,
-                "fda_citations":    "\n\n".join(citations) or "(no citation text stored)",
-                "fda_cgmp_refs":    fda_refs,
-                "warning_letter_url": insp.pdf_url or "",
+                "firm_name":       insp.firm_name or "",
+                "country":         insp.country or "",
+                "inspection_date": insp.inspection_end_date,
+                "num_findings":    insp.num_observations or 0,
+                "fda_citations":   "\n\n".join(citations) or "(no citation text stored)",
+                "fda_cgmp_refs":   fda_refs,
             })
 
-    print(f"Found {len(rows)} analyzed inspections for January 2025")
+    print(f"Found {len(rows)} analyzed inspections (Jan 2025 – Jun 2026)")
     if not rows:
         print("No data — check that the backfill ran for January 2025.")
         return
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Jan 2025 FDA Citations"
+    ws.title = "FDA Citations 2025-2026"
 
     # ── Title ─────────────────────────────────────────────────────────────────
-    ws.merge_cells("A1:I1")
+    ws.merge_cells("A1:F1")
     t = ws.cell(row=1, column=1,
-        value=f"FDA CGMP Warning Letters — January 2025  ({len(rows)} inspections)")
+        value=f"FDA CGMP Warning Letters — Jan 2025 to Jun 2026  ({len(rows)} inspections)")
     t.font = Font(bold=True, size=14, color="1F4E79")
     t.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 30
@@ -137,12 +133,10 @@ def main():
     headers = [
         "Firm Name",
         "Country",
-        "Location",
         "Inspection Date",
         "# Findings",
         "FDA CITATIONS\n(Original text from Warning Letter)",
         "FDA cGMP REFERENCES\n(21 CFR 210/211 — mapped per finding)",
-        "Warning Letter URL",
     ]
     for col, h in enumerate(headers, 1):
         _cell(ws, 2, col, h, font=HEADER_FONT, fill=HEADER_FILL, wrap=True)
@@ -155,33 +149,31 @@ def main():
         values = [
             r["firm_name"],
             r["country"],
-            r["location"],
             str(r["inspection_date"]) if r["inspection_date"] else "",
             r["num_findings"],
             r["fda_citations"],
             r["fda_cgmp_refs"],
-            r["warning_letter_url"],
         ]
 
         for col, val in enumerate(values, 1):
-            if col == 6:
-                fill = CITE_FILL      # warm cream — original FDA text
-            elif col == 7:
-                fill = REF_FILL       # light green — regulatory references
+            if col == 5:
+                fill = CITE_FILL
+            elif col == 6:
+                fill = REF_FILL
             else:
                 fill = alt
 
-            c = _cell(ws, row_idx, col, val, fill=fill, wrap=(col >= 6))
-            if col == 6:
+            c = _cell(ws, row_idx, col, val, fill=fill, wrap=(col >= 5))
+            if col == 5:
                 c.font = Font(size=9)
-            elif col == 7:
+            elif col == 6:
                 c.font = Font(size=9, bold=False, color="1A4D1A")
 
         citation_lines = r["fda_citations"].count("\n") + 1
         ws.row_dimensions[row_idx].height = min(400, max(80, citation_lines * 13))
 
     # ── Column widths ─────────────────────────────────────────────────────────
-    widths = [28, 10, 16, 14, 8, 72, 48, 38]
+    widths = [28, 12, 14, 8, 72, 50]
     for col, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = w
 
@@ -224,7 +216,7 @@ def main():
     leg.column_dimensions["C"].width = 55
 
     # ── Save & open ───────────────────────────────────────────────────────────
-    out = Path(__file__).parent / "data" / "reports" / "FDA_CGMP_Jan2025_citations.xlsx"
+    out = Path(__file__).parent / "data" / "reports" / "FDA_CGMP_2025_2026_citations.xlsx"
     wb.save(out)
     print(f"\nSaved: {out}")
     import subprocess
